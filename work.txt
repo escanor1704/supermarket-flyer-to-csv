@@ -1,0 +1,10 @@
+tesseract installation:
+Tesseract is a separate program, not a Python package. It also needs the German language data to read words like “Größe” or “Stück”
+use the installer from UB Mannheim.
+
+what is tesseract?
+Tesseract is a free, open-source OCR (Optical Character Recognition) engine.
+It reads text from images like scans, photos or flyers and turns it into editable, searchable text.
+
+VENV:
+to activate venv "source .venv/Scripts/activate"
