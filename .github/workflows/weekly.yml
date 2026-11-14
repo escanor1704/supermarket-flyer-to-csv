@@ -36,7 +36,7 @@ jobs:
       # ----- YOUR KEYS: they come from GitHub Secrets - never type the keys into this file -----
       AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APP_KEY }}
-      # NEW: send files the normal way (Backblaze does not accept the new "chunked" way)
+      # send files the normal way (Backblaze does not accept the new "chunked" way)
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
       AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
 
@@ -53,13 +53,14 @@ jobs:
       - name: "2 Build - install the packages"
         run: python -m pip install -r requirements.txt "pytest>=9,<10"
 
-      # NEW: ask Backblaze if the key is right, BEFORE the long pipeline runs
       - name: "2 Build - check the Backblaze key"
         if: github.event_name != 'push'
         run: |
           python - <<'EOF'
           import base64, json, os, urllib.request, urllib.error
-          pair = os.environ["AWS_ACCESS_KEY_ID"] + ":" + os.environ["AWS_SECRET_ACCESS_KEY"]
+          key_id = os.environ["AWS_ACCESS_KEY_ID"].strip()          # NEW: .strip() removes copied spaces
+          app_key = os.environ["AWS_SECRET_ACCESS_KEY"].strip()     # NEW
+          pair = key_id + ":" + app_key
           request = urllib.request.Request(
               "https://api.backblazeb2.com/b2api/v3/b2_authorize_account",
               headers={"Authorization": "Basic " + base64.b64encode(pair.encode()).decode()})
@@ -95,6 +96,9 @@ jobs:
       - name: "4 Deliver - store this week's offers in Backblaze B2"
         if: github.event_name != 'push'
         run: |
+          # NEW: remove copied spaces / line breaks from the keys (real keys never contain spaces)
+          export AWS_ACCESS_KEY_ID="$(echo "$AWS_ACCESS_KEY_ID" | tr -d '[:space:]')"
+          export AWS_SECRET_ACCESS_KEY="$(echo "$AWS_SECRET_ACCESS_KEY" | tr -d '[:space:]')"
           WEEK=$(cat data/current_week.txt)
           aws s3 cp data/output/offers.csv "s3://$B2_BUCKET/weekly/offers_$WEEK.csv" --endpoint-url "$B2_ENDPOINT"
 
