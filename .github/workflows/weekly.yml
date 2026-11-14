@@ -1,6 +1,6 @@
 # Weekly flyer pipeline on GitHub's computers (your PC can be off)
 #   1 Source  -> every Sunday 06:07 (Berlin time), or the "Run workflow" button
-#   2 Build   -> get the code, install the packages
+#   2 Build   -> get the code, install the packages, check the Backblaze key
 #   3 Test    -> quick tests; one fails = stop (nothing is stored)
 #   4 Deliver -> run.py makes this week's offers, test them, store them in Backblaze B2
 #                as weekly/offers_<week>.csv (one file per week - older weeks are never touched)
@@ -36,6 +36,9 @@ jobs:
       # ----- YOUR KEYS: they come from GitHub Secrets - never type the keys into this file -----
       AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APP_KEY }}
+      # NEW: send files the normal way (Backblaze does not accept the new "chunked" way)
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
 
     steps:
       - name: "2 Build - get the code"
@@ -49,6 +52,34 @@ jobs:
 
       - name: "2 Build - install the packages"
         run: python -m pip install -r requirements.txt "pytest>=9,<10"
+
+      # NEW: ask Backblaze if the key is right, BEFORE the long pipeline runs
+      - name: "2 Build - check the Backblaze key"
+        if: github.event_name != 'push'
+        run: |
+          python - <<'EOF'
+          import base64, json, os, urllib.request, urllib.error
+          pair = os.environ["AWS_ACCESS_KEY_ID"] + ":" + os.environ["AWS_SECRET_ACCESS_KEY"]
+          request = urllib.request.Request(
+              "https://api.backblazeb2.com/b2api/v3/b2_authorize_account",
+              headers={"Authorization": "Basic " + base64.b64encode(pair.encode()).decode()})
+          try:
+              answer = json.load(urllib.request.urlopen(request, timeout=30))
+          except urllib.error.HTTPError as error:
+              print("KEY NOT ACCEPTED by Backblaze:", error.code, error.read().decode()[:200])
+              print("-> make a new application key: keyID into B2_KEY_ID, applicationKey into B2_APP_KEY")
+              raise SystemExit(1)
+          storage = answer.get("apiInfo", {}).get("storageApi", {})
+          allowed = storage.get("allowed", {})
+          capabilities = allowed.get("capabilities")
+          print("Key accepted by Backblaze")
+          print("  buckets:     ", [bucket.get("name") for bucket in allowed.get("buckets") or []] or "all buckets")
+          print("  capabilities:", capabilities)
+          print("  S3 endpoint: ", storage.get("s3ApiUrl"))
+          if capabilities is not None and "writeFiles" not in capabilities:
+              print("-> this key is NOT allowed to write files - make a new key with Read and Write")
+              raise SystemExit(1)
+          EOF
 
       - name: "3 Test - quick tests"
         run: python -m pytest -v tests/test_quick.py
