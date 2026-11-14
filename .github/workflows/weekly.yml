@@ -1,0 +1,90 @@
+# Weekly flyer pipeline on GitHub's computers (your PC can be off)
+#   1 Source  -> every Sunday 12:17 (Berlin time), or the "Run workflow" button
+#   2 Build   -> get the code + the last offers.csv from Backblaze B2, install the packages
+#   3 Test    -> quick tests; one fails = stop (offers.csv in B2 stays as it was)
+#   4 Deliver -> run.py makes this week's offers, test again, save offers.csv to B2
+#   5 Deploy  -> none yet
+# When you push new code, only Build + Test run (a quick check of your change).
+
+name: Weekly flyer pipeline
+
+on:
+  schedule:
+    - cron: "17 12 * * 0"            # minute 17, hour 12, every Sunday (0)
+      timezone: "Europe/Berlin"
+  workflow_dispatch:                  # adds the "Run workflow" button
+  push:
+    branches: [main]
+
+permissions:
+  contents: read                      # GitHub only reads your code, nothing is written back
+
+concurrency:
+  group: weekly-flyer-pipeline        # never two runs at the same time
+  cancel-in-progress: false
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # ----- YOUR VALUES (not secret) -----
+      B2_BUCKET: rohith-flyer-offers                           # <- your bucket name
+      B2_ENDPOINT: https://s3.us-east-005.backblazeb2.com   # <- https:// + "Endpoint" from your bucket page
+      AWS_DEFAULT_REGION: eu-central-003                       # <- the middle part of that Endpoint
+      # ----- YOUR KEYS: they come from GitHub Secrets - never type the keys into this file -----
+      AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APP_KEY }}
+
+    steps:
+      - name: "2 Build - get the code"
+        uses: actions/checkout@v7
+
+      - name: "2 Build - Python (same version as on your PC)"
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"                               # <- your PC's Python version
+          cache: pip
+
+      - name: "2 Build - install the packages"
+        run: python -m pip install -r requirements.txt "pytest>=9,<10"
+
+      - name: "2 Build - get the last offers.csv from Backblaze B2"
+        if: github.event_name != 'push'
+        run: |
+          mkdir -p data/output
+          aws s3 cp "s3://$B2_BUCKET/offers.csv" data/output/offers.csv --endpoint-url "$B2_ENDPOINT"
+          cp data/output/offers.csv data/offers_before_run.csv
+
+      - name: "3 Test - quick tests"
+        run: python -m pytest -v tests/test_quick.py
+
+      - name: "4 Deliver - make this week's offers"
+        if: github.event_name != 'push'
+        run: python run.py
+
+      - name: "4 Deliver - test the new offers.csv before saving it"
+        if: github.event_name != 'push'
+        run: python -m pytest -v tests/test_quick.py
+
+      - name: "4 Deliver - save offers.csv to Backblaze B2"
+        if: github.event_name != 'push'
+        run: aws s3 cp data/output/offers.csv "s3://$B2_BUCKET/offers.csv" --endpoint-url "$B2_ENDPOINT"
+
+      - name: "Show the quality report on the run page"
+        if: always() && github.event_name != 'push'
+        run: |
+          if [ -f logs/quality_report.txt ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat logs/quality_report.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: "Keep the log files for 14 days (download them on the run page)"
+        if: always() && github.event_name != 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs
+          path: logs/
+          retention-days: 14
+          if-no-files-found: ignore

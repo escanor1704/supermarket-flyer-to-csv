@@ -8,3 +8,10 @@ It reads text from images like scans, photos or flyers and turns it into editabl
 
 VENV:
 to activate venv "source .venv/Scripts/activate"
+
+keyID:
+00572926685ae030000000001
+keyName:
+github-flyer-pipeline
+applicationKey:
+K005UzOvjbTsSz6hw+22Sy6nvJc8PBY

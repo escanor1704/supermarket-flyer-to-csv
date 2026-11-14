@@ -1,6 +1,7 @@
+# not for GitHub
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 data/
 logs/
-config/translations.csv
