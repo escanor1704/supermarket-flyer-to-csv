@@ -1,11 +1,13 @@
 # Weekly flyer pipeline on GitHub's computers (your PC can be off)
-#   1 Source  -> every Sunday 06:07 (Berlin time), or the "Run workflow" button
-#   2 Build   -> get the code, install the packages, check the Backblaze key
-#   3 Test    -> quick tests; one fails = stop (nothing is stored)
-#   4 Deliver -> run.py makes this week's offers, test them, store them in Backblaze B2
-#                as weekly/offers_<week>.csv (one file per week - older weeks are never touched)
-#   5 Deploy  -> none yet
-# When you push new code, only Build + Test run (a quick check of your change).
+# The run page shows 3 boxes:   Build  ->  Test  ->  Deliver
+#   Source  -> every Sunday 06:07 (Berlin time), or the "Run workflow" button
+#   Build   -> get the code, install the packages
+#   Test    -> quick tests; one fails = stop (nothing is stored)
+#   Deliver -> check the Backblaze key, run.py makes this week's offers, test them,
+#              store them in Backblaze B2 as weekly/offers_<week>.csv
+#   Deploy  -> none yet
+# When you push new code, only Build + Test run (Deliver is shown as "skipped").
+# Every box runs on its OWN fresh GitHub computer, so each box gets the code and installs the packages.
 
 name: Weekly flyer pipeline
 
@@ -25,7 +27,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  weekly:
+  # ---------------- BOX 1: BUILD ----------------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Python (same version as on your PC)
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the packages
+        run: python -m pip install -r requirements.txt "pytest>=9,<10"
+
+  # ---------------- BOX 2: TEST ----------------
+  test:
+    name: Test
+    needs: build                      # starts only if Build worked
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Python (same version as on your PC)
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the packages
+        run: python -m pip install -r requirements.txt "pytest>=9,<10"
+
+      - name: Quick tests
+        run: python -m pytest -v tests/test_quick.py
+
+  # ---------------- BOX 3: DELIVER ----------------
+  deliver:
+    name: Deliver
+    needs: test                       # starts only if Test worked
+    if: github.event_name != 'push'   # not when you only push code
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -39,27 +85,25 @@ jobs:
       # send files the normal way (Backblaze does not accept the new "chunked" way)
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
       AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-
     steps:
-      - name: "2 Build - get the code"
+      - name: Get the code
         uses: actions/checkout@v7
 
-      - name: "2 Build - Python (same version as on your PC)"
+      - name: Python (same version as on your PC)
         uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
 
-      - name: "2 Build - install the packages"
+      - name: Install the packages
         run: python -m pip install -r requirements.txt "pytest>=9,<10"
 
-      - name: "2 Build - check the Backblaze key"
-        if: github.event_name != 'push'
+      - name: Check the Backblaze key
         run: |
           python - <<'EOF'
           import base64, json, os, urllib.request, urllib.error
-          key_id = os.environ["AWS_ACCESS_KEY_ID"].strip()          # NEW: .strip() removes copied spaces
-          app_key = os.environ["AWS_SECRET_ACCESS_KEY"].strip()     # NEW
+          key_id = os.environ["AWS_ACCESS_KEY_ID"].strip()          # .strip() removes copied spaces
+          app_key = os.environ["AWS_SECRET_ACCESS_KEY"].strip()
           pair = key_id + ":" + app_key
           request = urllib.request.Request(
               "https://api.backblazeb2.com/b2api/v3/b2_authorize_account",
@@ -82,28 +126,22 @@ jobs:
               raise SystemExit(1)
           EOF
 
-      - name: "3 Test - quick tests"
-        run: python -m pytest -v tests/test_quick.py
-
-      - name: "4 Deliver - make this week's offers"
-        if: github.event_name != 'push'
+      - name: Make this week's offers
         run: python run.py
 
-      - name: "4 Deliver - test the new offers before storing them"
-        if: github.event_name != 'push'
+      - name: Test the new offers before storing them
         run: python -m pytest -v tests/test_quick.py
 
-      - name: "4 Deliver - store this week's offers in Backblaze B2"
-        if: github.event_name != 'push'
+      - name: Store this week's offers in Backblaze B2
         run: |
-          # NEW: remove copied spaces / line breaks from the keys (real keys never contain spaces)
+          # remove copied spaces / line breaks from the keys (real keys never contain spaces)
           export AWS_ACCESS_KEY_ID="$(echo "$AWS_ACCESS_KEY_ID" | tr -d '[:space:]')"
           export AWS_SECRET_ACCESS_KEY="$(echo "$AWS_SECRET_ACCESS_KEY" | tr -d '[:space:]')"
           WEEK=$(cat data/current_week.txt)
           aws s3 cp data/output/offers.csv "s3://$B2_BUCKET/weekly/offers_$WEEK.csv" --endpoint-url "$B2_ENDPOINT"
 
-      - name: "Show the quality report on the run page"
-        if: always() && github.event_name != 'push'
+      - name: Show the quality report on the run page
+        if: always()
         run: |
           if [ -f logs/quality_report.txt ]; then
             echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -111,8 +149,8 @@ jobs:
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: "Keep the log files for 14 days (download them on the run page)"
-        if: always() && github.event_name != 'push'
+      - name: Keep the log files for 14 days (download them on the run page)
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: logs
