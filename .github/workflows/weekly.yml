@@ -31,7 +31,7 @@ jobs:
       # ----- YOUR VALUES (not secret) -----
       B2_BUCKET: rohith-flyer-offers                           # <- your bucket name
       B2_ENDPOINT: https://s3.us-east-005.backblazeb2.com   # <- https:// + "Endpoint" from your bucket page
-      AWS_DEFAULT_REGION: eu-central-003                       # <- the middle part of that Endpoint
+      AWS_DEFAULT_REGION: us-east-005                      # <- the middle part of that Endpoint
       # ----- YOUR KEYS: they come from GitHub Secrets - never type the keys into this file -----
       AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APP_KEY }}
