@@ -1,22 +1,35 @@
-# Stage 1: pick this week's flyer from data/flyers/kaufland and turn its pages into pictures
-#   All flyers of a store live in ONE folder: data/flyers/kaufland/kaufland_2026-W46.pdf
-#   (ingest.py downloads them there; you can also put a flyer there yourself, with any name)
-#   1. a flyer you put there yourself gets its week from its own dates: Prospekt.pdf -> kaufland_2026-W46.pdf
-#   2. the pipeline works on the NEWEST week and remembers it (data/current_week.txt)
-#   3. only the newest 4 weeks of flyers are kept (keep_weeks in config/settings.yaml)
-#   4. every page is saved as a picture + checked for real text (as before)
+# Stage 1: which weeks are new? + turn the pages of a week's flyers into pictures  -  version 3: Kaufland + Netto
+# run.py uses this stage in two ways:
+#   python pipeline/preprocess.py plan      -> 1. a flyer you put in data/flyers/<store> yourself gets its week
+#                                                 from its own dates: Prospekt.pdf -> netto_2026-W46.pdf
+#                                              2. only the newest 4 weeks of flyers are kept (keep_weeks in config/settings.yaml)
+#                                              3. the weeks to do = every flyer week that is NOT in data/output yet
+#                                                 (offers_2026-W46.csv already has Kaufland -> Kaufland W46 is not run again)
+#                                                 -> data/weeks_to_do.txt
+#   python pipeline/preprocess.py 2026-W47  -> the pictures of week 47 of every store that still needs it -> data/pages/<store>
+#   python pipeline/preprocess.py           -> (alone) plan + the first week to do
+# Each store has its own functions, because each flyer writes its dates in its own way.
+# If Netto fails, Kaufland still goes on.
 
 import os
+import sys
 import csv
 import re
+import shutil
 import datetime
 import pymupdf
 import storage
 
+WEEKS_FILE = "data/weeks_to_do.txt"
+
+
+# =====================================================================================================
+# KAUFLAND - writes its dates as "MONTAG, 09.11." (and once with the year: "SAMSTAG, 14.11.2026")
+# =====================================================================================================
 WEEKDAYS = "MONTAG|DIENSTAG|MITTWOCH|DONNERSTAG|FREITAG|SAMSTAG"
 
 
-def flyer_week(pdf):
+def kaufland_flyer_week(pdf):
     """read the week from the flyer's own dates -> '2026-W46'
     Kaufland writes "MONTAG, 09.11." on almost every page: the date written most often is the start day."""
     text = ""
@@ -42,60 +55,234 @@ def flyer_week(pdf):
     return str(year) + "-W" + str(week_number).zfill(2)
 
 
-store = storage.settings()["store"]
-folder = storage.flyers_folder()
-storage.move_old_flyers()                              # one time: flyers from the old folders inbox/ and raw/
+def kaufland_plan():
+    """Kaufland: name your own flyers, keep the newest weeks -> the weeks of all Kaufland flyers ['2026-W46', '2026-W47']"""
+    store = "kaufland"
+    folder = storage.flyers_folder(store)
+    storage.move_old_flyers(store)                     # one time: flyers from the old folders inbox/ and raw/
 
-# 1. a flyer without a week in its name (you put it there yourself) -> give it its week
-for name in sorted(os.listdir(folder)):
-    if name.lower().endswith(".pdf") and storage.week_of(name) is None:
-        pdf = pymupdf.open(folder + "/" + name)
-        week = flyer_week(pdf)
-        pdf.close()                                    # close it, so Windows lets us rename it
-        new_name = store + "_" + week + ".pdf"
-        os.replace(folder + "/" + name, folder + "/" + new_name)     # the same week again -> replaced
-        print("Named your flyer:", name, "->", new_name)
+    # 1. a flyer without a week in its name (you put it there yourself) -> give it its week
+    for name in sorted(os.listdir(folder)):
+        if name.lower().endswith(".pdf") and storage.week_of(name) is None:
+            pdf = pymupdf.open(folder + "/" + name)
+            week = kaufland_flyer_week(pdf)
+            pdf.close()                                # close it, so Windows lets us rename it
+            new_name = store + "_" + week + ".pdf"
+            os.replace(folder + "/" + name, folder + "/" + new_name)     # the same week again -> replaced
+            print("Named your flyer:", name, "->", new_name)
 
-# 2. the newest week is the one we work on
-flyers = storage.weekly_flyers()
-if len(flyers) == 0:
-    print("No flyer in", folder, "- put this week's flyer there (any name) or run: python pipeline/ingest.py")
-    exit(1)
-week = storage.week_of(flyers[-1])
-storage.save_current_week(week)
-pdf_path = storage.flyer_path(week)
-print("Working on week", week, "->", pdf_path)
+    # 2. keep only the newest weeks of flyers
+    storage.delete_old_flyers(store)
+    flyers = storage.weekly_flyers(store)
+    if len(flyers) == 0:
+        print("No flyer in", folder, "- put this week's flyer there (any name) or run: python pipeline/ingest.py")
+        exit(1)
+    return [storage.week_of(name) for name in flyers]
 
-# 3. keep only the newest weeks of flyers
-storage.delete_old_flyers()
 
-# 4. turn each page into a picture and check if it has real text (as before)
-output_folder = "data/pages/kaufland"
-os.makedirs(output_folder, exist_ok=True)
-pdf = pymupdf.open(pdf_path)
-report = []
-for page in pdf:
-    page_number = page.number + 1
+def kaufland(week):
+    """Kaufland: the pages of this week's flyer -> pictures + manifest.csv in data/pages/kaufland (as before)"""
+    pdf_path = storage.flyer_path("kaufland", week)
+    if not os.path.exists(pdf_path):
+        print("No Kaufland flyer of week", week, "- Kaufland is skipped for this week")
+        return
+    if storage.already_done("kaufland", week):
+        print("Week", week, "is already done for Kaufland ->", storage.weekly_file(week), "- not run again")
+        return
+    print("Working on", pdf_path)
 
-    # save the page as a picture (300 DPI)
-    picture = page.get_pixmap(dpi=300)
-    picture_name = "page_" + str(page_number) + ".png"
-    picture.save(output_folder + "/" + picture_name)
+    output_folder = "data/pages/kaufland"
+    os.makedirs(output_folder, exist_ok=True)
+    pdf = pymupdf.open(pdf_path)
+    report = []
+    for page in pdf:
+        page_number = page.number + 1
 
-    # check if the page has real text
-    text = page.get_text()
-    if len(text.strip()) > 50:
-        has_text = "yes"
+        # save the page as a picture (300 DPI)
+        picture = page.get_pixmap(dpi=300)
+        picture_name = "page_" + str(page_number) + ".png"
+        picture.save(output_folder + "/" + picture_name)
+
+        # check if the page has real text
+        text = page.get_text()
+        if len(text.strip()) > 50:
+            has_text = "yes"
+        else:
+            has_text = "no"
+        print("Page", page_number, "- text layer:", has_text)
+        report.append([page_number, has_text, picture_name])
+    pdf.close()
+
+    # save the report as a CSV file
+    with open(output_folder + "/manifest.csv", "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.writer(file)
+        writer.writerow(["page", "has_text_layer", "picture"])
+        writer.writerows(report)
+
+    print("Done! Week", week, "- pictures and manifest.csv saved in", output_folder)
+
+
+# =====================================================================================================
+# NETTO - writes its dates as "Montag 09.11. – Samstag 14.11.26" (or one day: "Dienstag, 10.11.2026")
+# =====================================================================================================
+NETTO_WEEKDAYS = "Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag"
+
+
+def netto_flyer_week(pdf):
+    """read the week from the flyer's own dates -> '2026-W46'
+    Netto writes "Montag 09.11. – Samstag 14.11.26" on almost every page: the date written most often is the start day."""
+    text = ""
+    for page in pdf:
+        text = text + page.get_text() + "\n"
+    text = text.replace("\u2009", " ").replace("\u202f", " ").replace("\xa0", " ")      # thin spaces -> normal spaces
+    # the year: "Samstag 14.11.26" or "Dienstag, 10.11.2026", else this year
+    year = datetime.date.today().year
+    match = re.search(r"(?:" + NETTO_WEEKDAYS + r"),? \d\d\.\d\d\.(\d{4}|\d\d)\b", text, re.IGNORECASE)
+    if match:
+        year = int(match.group(1))
+        if year < 100:
+            year = 2000 + year                          # "26" -> 2026
+    # every weekday date: "Montag 09.11." -> 2026-11-09
+    days = []
+    for day, month in re.findall(r"(?:" + NETTO_WEEKDAYS + r"),? (\d\d)\.(\d\d)\.", text, re.IGNORECASE):
+        try:
+            days.append(datetime.date(year, int(month), int(day)))
+        except ValueError:
+            pass                                        # not a real date
+    if len(days) == 0:
+        print("WARNING: no dates found in the Netto flyer - using this week")
+        days = [datetime.date.today()]
+    start = max(days, key=days.count)                   # the date written most often (every day of it is in the same week)
+    year, week_number, weekday = start.isocalendar()
+    return str(year) + "-W" + str(week_number).zfill(2)
+
+
+def netto_plan():
+    """Netto: name your own flyers, keep the newest weeks -> the weeks of all Netto flyers ['2026-W46', '2026-W47']"""
+    store = "netto"
+    folder = storage.flyers_folder(store)
+
+    # 1. a flyer without a week in its name (you put it there yourself) -> give it its week
+    for name in sorted(os.listdir(folder)):
+        if name.lower().endswith(".pdf") and storage.week_of(name) is None:
+            pdf = pymupdf.open(folder + "/" + name)
+            week = netto_flyer_week(pdf)
+            pdf.close()                                # close it, so Windows lets us rename it
+            new_name = store + "_" + week + ".pdf"
+            os.replace(folder + "/" + name, folder + "/" + new_name)     # the same week again -> replaced
+            print("Named your flyer:", name, "->", new_name)
+
+    # 2. keep only the newest weeks of flyers
+    storage.delete_old_flyers(store)
+    flyers = storage.weekly_flyers(store)
+    if len(flyers) == 0:
+        print("No Netto flyer in", folder, "- Netto is skipped (Kaufland goes on)")
+    return [storage.week_of(name) for name in flyers]
+
+
+def netto(week):
+    """Netto: the pages of this week's flyer -> pictures + manifest.csv in data/pages/netto"""
+    pdf_path = storage.flyer_path("netto", week)
+    if not os.path.exists(pdf_path):
+        print("No Netto flyer of week", week, "- Netto is skipped for this week")
+        return
+    if storage.already_done("netto", week):
+        print("Week", week, "is already done for Netto ->", storage.weekly_file(week), "- not run again")
+        return
+    print("Working on", pdf_path)
+
+    output_folder = "data/pages/netto"
+    os.makedirs(output_folder, exist_ok=True)
+    pdf = pymupdf.open(pdf_path)
+    report = []
+    for page in pdf:
+        page_number = page.number + 1
+        picture = page.get_pixmap(dpi=300)                 # the page as a picture (300 DPI)
+        picture_name = "page_" + str(page_number) + ".png"
+        picture.save(output_folder + "/" + picture_name)
+        has_text = "yes" if len(page.get_text().strip()) > 50 else "no"
+        print("Page", page_number, "- text layer:", has_text)
+        report.append([page_number, has_text, picture_name])
+    pdf.close()
+    with open(output_folder + "/manifest.csv", "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.writer(file)
+        writer.writerow(["page", "has_text_layer", "picture"])
+        writer.writerows(report)
+
+    print("Done! Week", week, "- pictures and manifest.csv saved in", output_folder)
+
+
+# =====================================================================================================
+# RUN (only when started as a program - not when the tests read this file)
+# =====================================================================================================
+STORE_PLANS = {"kaufland": kaufland_plan, "netto": netto_plan}
+STORE_PARTS = {"kaufland": kaufland, "netto": netto}
+
+
+def plan():
+    """every store: name + clean up its flyers -> the weeks that are not in data/output yet (oldest first)"""
+    weeks_to_do = []
+    for store in storage.stores():
+        if store not in STORE_PLANS:
+            print("\n" + store + ": preprocess.py has no function for this store yet - skipped")
+            continue
+        print("\n----- " + store + " -----")
+        try:
+            for week in STORE_PLANS[store]():
+                if storage.already_done(store, week):
+                    print("Week", week, "is already done ->", storage.weekly_file(week))
+                else:
+                    print("Week", week, "is NEW -> will be made")
+                    if week not in weeks_to_do:
+                        weeks_to_do.append(week)
+        except Exception as error:
+            storage.store_failed(store, "preprocess (plan)", error)
+    weeks_to_do.sort()
+    with open(WEEKS_FILE, "w", encoding="utf-8") as file:
+        file.write("\n".join(weeks_to_do))
+    if weeks_to_do:
+        print("\nWeeks to do:", ", ".join(weeks_to_do), "(saved in " + WEEKS_FILE + ")")
     else:
-        has_text = "no"
-    print("Page", page_number, "- text layer:", has_text)
-    report.append([page_number, has_text, picture_name])
-pdf.close()
+        print("\nNothing new: every flyer week is already in data/output (to make a week again: delete its offers_<week>.csv)")
+    return weeks_to_do
 
-# save the report as a CSV file
-with open(output_folder + "/manifest.csv", "w", newline="", encoding="utf-8-sig") as file:
-    writer = csv.writer(file)
-    writer.writerow(["page", "has_text_layer", "picture"])
-    writer.writerows(report)
 
-print("Done! Week", week, "- pictures and manifest.csv saved in", output_folder)
+def pictures(week):
+    """one week: start clean, remember the week, then the pictures of every store that still needs this week"""
+    # start clean: the work files and results of the last week are removed (they are made again)
+    try:
+        for store in storage.stores():
+            for folder in ["data/pages/", "data/text/", "data/offers/"]:
+                if os.path.exists(folder + store):
+                    shutil.rmtree(folder + store)
+            for file_name in ["offers_checked.csv", "offers_verified.csv", "not_offers.csv"]:
+                if os.path.exists("data/review/" + store + "/" + file_name):
+                    os.remove("data/review/" + store + "/" + file_name)
+    except PermissionError as error:
+        print("Could not delete", error.filename, "- is it open (e.g. in Excel)? Close it and run again.")
+        exit(1)
+    storage.save_current_week(week)                    # the next stages work on this week
+    print("Week", week)
+    for store in storage.stores():
+        if store not in STORE_PARTS:
+            continue
+        print("\n----- " + store + " -----")
+        try:
+            STORE_PARTS[store](week)
+        except Exception as error:
+            storage.store_failed(store, "preprocess", error)
+
+
+if __name__ == "__main__":
+    argument = sys.argv[1] if len(sys.argv) > 1 else ""
+    if argument == "plan":
+        plan()
+    elif re.fullmatch(r"\d{4}-W\d\d", argument):
+        pictures(argument)
+    elif argument == "":
+        weeks = plan()
+        if weeks:
+            pictures(weeks[0])
+    else:
+        print("Unknown argument:", argument, "- use: plan, a week like 2026-W47, or nothing")
+        exit(1)
