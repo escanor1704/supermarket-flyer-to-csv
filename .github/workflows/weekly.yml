@@ -2,9 +2,11 @@
 #
 # How it works:   Build -> Test -> Deliver   (3 boxes on the run page, each on its own fresh computer)
 #   when:     every Sunday 06:07 Berlin time, or the "Run workflow" button
+#             (in the button you can type a week number, e.g. 46, to make an older week - only while its flyers are online)
 #   Build     get the code, install the packages
 #   Test      the quick tests - one fails = stop, nothing is stored
-#   Deliver   run.py makes the new week's file, the tests check it, then it goes to Backblaze B2 as weekly/offers_<week>.csv
+#   Deliver   run.py makes the week's file, the tests check it, then every weekly file it made goes to
+#             Backblaze B2 as weekly/offers_<week>.csv (an old file there is replaced, Backblaze keeps the old version)
 #   A push of new code only runs Build + Test (Deliver shows as "skipped").
 #   The Backblaze keys come from GitHub Secrets (B2_KEY_ID, B2_APP_KEY) - never type them into this file.
 #
@@ -12,6 +14,7 @@
 #   - it was one big "weekly" box -> split into Build, Test, Deliver, so I can see where it broke
 #   - Backblaze said "Seed signature is invalid" -> fixed with the two checksum lines below and a new key without spaces
 #   - first it downloaded offers.csv from Backblaze to add to it (403 error) -> now it only stores, one file per week
+#   - Lidl came later, but GitHub only makes next week -> the week field in "Run workflow" makes an older week again
 
 name: Weekly flyer pipeline
 
@@ -20,6 +23,11 @@ on:
     - cron: "7 6 * * 0"              # minute 7, hour 6, every Sunday (0)
       timezone: "Europe/Berlin"
   workflow_dispatch:                  # adds the "Run workflow" button
+    inputs:
+      week:
+        description: "Week number to make again, e.g. 46 (leave empty = next week, like on Sunday)"
+        required: false
+        default: ""
   push:
     branches: [main]
 
@@ -102,16 +110,28 @@ jobs:
       - name: Install the packages
         run: python -m pip install -r requirements.txt "pytest>=9,<10"
 
-      - name: Make the new week's offers
-        run: python run.py
+      - name: Make the offers (next week, or the week typed in "Run workflow")
+        env:
+          WEEK_NUMBER: ${{ inputs.week }}
+        run: |
+          if [ -z "$WEEK_NUMBER" ]; then
+            python run.py                                 # normal: download next week's flyers and make them
+          elif [[ "$WEEK_NUMBER" =~ ^[0-9]{1,2}$ ]]; then
+            python pipeline/ingest.py "$WEEK_NUMBER" || echo "not every store could be downloaded - going on with the ones that worked"
+            python run.py preprocess                      # make only that week (the normal download is skipped)
+          else
+            echo "Type only the week number, e.g. 46 (you typed: $WEEK_NUMBER)"
+            exit 1
+          fi
 
-      - name: Test the new weekly file before storing it
+      - name: Test the new weekly files before storing them
         run: python -m pytest -v tests/test_quick.py
 
-      - name: Store this week's offers in Backblaze B2
+      - name: Store the weekly files in Backblaze B2
         run: |
-          WEEK=$(cat data/current_week.txt)
-          aws s3 cp "data/output/offers_$WEEK.csv" "s3://$B2_BUCKET/weekly/offers_$WEEK.csv" --endpoint-url "$B2_ENDPOINT"
+          for file in data/output/offers_*-W*.csv; do      # every weekly file this run made
+            aws s3 cp "$file" "s3://$B2_BUCKET/weekly/$(basename "$file")" --endpoint-url "$B2_ENDPOINT"
+          done
 
       - name: Show the quality report on the run page
         if: always()
