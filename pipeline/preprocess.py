@@ -1,15 +1,16 @@
-# Stage 1: which weeks are new? + turn the pages of a week's flyers into pictures  -  version 3: Kaufland + Netto
-# run.py uses this stage in two ways:
-#   python pipeline/preprocess.py plan      -> 1. a flyer you put in data/flyers/<store> yourself gets its week
-#                                                 from its own dates: Prospekt.pdf -> netto_2026-W46.pdf
-#                                              2. only the newest 4 weeks of flyers are kept (keep_weeks in config/settings.yaml)
-#                                              3. the weeks to do = every flyer week that is NOT in data/output yet
-#                                                 (offers_2026-W46.csv already has Kaufland -> Kaufland W46 is not run again)
-#                                                 -> data/weeks_to_do.txt
-#   python pipeline/preprocess.py 2026-W47  -> the pictures of week 47 of every store that still needs it -> data/pages/<store>
-#   python pipeline/preprocess.py           -> (alone) plan + the first week to do
-# Each store has its own functions, because each flyer writes its dates in its own way.
-# If Netto fails, Kaufland still goes on.
+# preprocess.py (stage 2 of 8) - finds the new weeks and turns the flyer pages into pictures
+#
+# How it works:
+#   python pipeline/preprocess.py plan       which weeks are new? = every flyer week that is not in data/output yet
+#                                            -> data/weeks_to_do.txt (run.py goes through them, oldest first)
+#   python pipeline/preprocess.py 2026-W47   the pages of week 47, for every store that still needs it -> data/pages/<store>
+#   A flyer you put into data/flyers/<store> yourself (any name) gets its week from its own dates.
+#   Every store writes its dates its own way: Kaufland "MONTAG, 09.11.", Netto "Montag 09.11. – Samstag 14.11.26",
+#   Lidl only in the footer "47/2026".
+#
+# Tried and tuned:
+#   - only the newest flyer was read -> Netto week 46 was never made; now every week that is not done yet is made
+#   - a finished week was read again on every run -> now it is skipped
 
 import os
 import sys
@@ -59,7 +60,6 @@ def kaufland_plan():
     """Kaufland: name your own flyers, keep the newest weeks -> the weeks of all Kaufland flyers ['2026-W46', '2026-W47']"""
     store = "kaufland"
     folder = storage.flyers_folder(store)
-    storage.move_old_flyers(store)                     # one time: flyers from the old folders inbox/ and raw/
 
     # 1. a flyer without a week in its name (you put it there yourself) -> give it its week
     for name in sorted(os.listdir(folder)):
@@ -213,10 +213,83 @@ def netto(week):
 
 
 # =====================================================================================================
+# LIDL - prints its edition in the footer: "HHZ – 47/2026 – DE" (week 47 of 2026)
+# =====================================================================================================
+def lidl_flyer_week(pdf):
+    """read the week from the footer of the flyer -> '2026-W47'   (the edition printed most often)"""
+    editions = []
+    for page in pdf:
+        for week_text, year_text in re.findall(r"\b(\d{1,2})/(20\d\d)\b", page.get_text()):
+            if 1 <= int(week_text) <= 53:
+                editions.append((int(year_text), int(week_text)))
+    if editions:
+        year, week_number = max(set(editions), key=editions.count)
+    else:
+        print("WARNING: no edition like '47/2026' found in the Lidl flyer - using this week")
+        year, week_number, weekday = datetime.date.today().isocalendar()
+    return str(year) + "-W" + str(week_number).zfill(2)
+
+
+def lidl_plan():
+    """Lidl: name your own flyers, keep the newest weeks -> the weeks of all Lidl flyers ['2026-W46', '2026-W47']"""
+    store = "lidl"
+    folder = storage.flyers_folder(store)
+
+    # 1. a flyer without a week in its name (you put it there yourself) -> give it its week
+    for name in sorted(os.listdir(folder)):
+        if name.lower().endswith(".pdf") and storage.week_of(name) is None:
+            pdf = pymupdf.open(folder + "/" + name)
+            week = lidl_flyer_week(pdf)
+            pdf.close()                                # close it, so Windows lets us rename it
+            new_name = store + "_" + week + ".pdf"
+            os.replace(folder + "/" + name, folder + "/" + new_name)     # the same week again -> replaced
+            print("Named your flyer:", name, "->", new_name)
+
+    # 2. keep only the newest weeks of flyers
+    storage.delete_old_flyers(store)
+    flyers = storage.weekly_flyers(store)
+    if len(flyers) == 0:
+        print("No Lidl flyer in", folder, "- Lidl is skipped (Kaufland goes on)")
+    return [storage.week_of(name) for name in flyers]
+
+
+def lidl(week):
+    """Lidl: the pages of this week's flyer -> pictures + manifest.csv in data/pages/lidl"""
+    pdf_path = storage.flyer_path("lidl", week)
+    if not os.path.exists(pdf_path):
+        print("No Lidl flyer of week", week, "- Lidl is skipped for this week")
+        return
+    if storage.already_done("lidl", week):
+        print("Week", week, "is already done for Lidl ->", storage.weekly_file(week), "- not run again")
+        return
+    print("Working on", pdf_path)
+
+    output_folder = "data/pages/lidl"
+    os.makedirs(output_folder, exist_ok=True)
+    pdf = pymupdf.open(pdf_path)
+    report = []
+    for page in pdf:
+        page_number = page.number + 1
+        picture = page.get_pixmap(dpi=300)                 # the page as a picture (300 DPI)
+        picture_name = "page_" + str(page_number) + ".png"
+        picture.save(output_folder + "/" + picture_name)
+        has_text = "yes" if len(page.get_text().strip()) > 50 else "no"
+        print("Page", page_number, "- text layer:", has_text)
+        report.append([page_number, has_text, picture_name])
+    pdf.close()
+    with open(output_folder + "/manifest.csv", "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.writer(file)
+        writer.writerow(["page", "has_text_layer", "picture"])
+        writer.writerows(report)
+
+    print("Done! Week", week, "- pictures and manifest.csv saved in", output_folder)
+
+
+# =====================================================================================================
 # RUN (only when started as a program - not when the tests read this file)
 # =====================================================================================================
-STORE_PLANS = {"kaufland": kaufland_plan, "netto": netto_plan}
-STORE_PARTS = {"kaufland": kaufland, "netto": netto}
+STORE_PLANS = {"kaufland": kaufland_plan, "netto": netto_plan, "lidl": lidl_plan}
+STORE_PARTS = {"kaufland": kaufland, "netto": netto, "lidl": lidl}
 
 
 def plan():

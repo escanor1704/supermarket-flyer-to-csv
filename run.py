@@ -1,11 +1,18 @@
-# Run the whole pipeline with one command - for every store in config/settings.yaml (Kaufland + Netto)
-#   python run.py              -> download -> which weeks are new? -> for EACH new week: read -> check -> final file
-#                                 -> report -> clean-up
-#   python run.py structure    -> starts at "structure" for the week of the last run (uses its saved work files)
-# The result: one file per week in data/output: offers_2026-W46.csv, offers_2026-W47.csv, ... (all stores together).
-# A week that is already in data/output is NOT run again - only the new weeks are (oldest first).
-# To make a week again: delete its file (e.g. data/output/offers_2026-W47.csv) and run: python run.py
-# Every stage has a Kaufland part and a Netto part. If Netto fails, Kaufland still goes on (and the report tells you).
+# run.py - runs the whole pipeline with one command
+#
+# How it works:
+#   python run.py             download -> which weeks are new? -> for every new week: read, check, save -> report -> clean-up
+#   python run.py structure   start again at one stage (for the week of the last run), e.g. after fixing an error
+#   The result is one CSV file per week in data/output (offers_2026-W47.csv) with all stores together.
+#   A week that is already there is skipped. To make a week again, delete its file and run again.
+#   If Kaufland fails the run stops; if Netto or Lidl fails, they are skipped and the rest goes on.
+#
+# Tried and tuned:
+#   - the weekly run was a Windows Task Scheduler job on my PC -> now GitHub Actions runs it every Sunday
+#   - all weeks were in one big offers.csv -> now one file per week, so an old week is never touched again
+#   - only the newest flyer was read, a missed week stayed missing -> now every week that is not done yet is made
+#   - the work files are only needed during the run -> the clean-up keeps just the weekly files and needs_review.csv
+#     (KEEP_WORK_FILES = True keeps everything, for checking)
 
 import os
 import re

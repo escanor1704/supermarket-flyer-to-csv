@@ -1,5 +1,13 @@
-# Quick tests - GitHub runs them before the pipeline, and once more before the weekly file is stored
-# On your PC:  python -m pytest -v tests/test_quick.py
+# test_quick.py - quick tests. GitHub runs them before the pipeline, and again before the weekly file is stored
+#
+# How it works:   python -m pytest -v tests/test_quick.py
+#   typos in the code, the settings file, the weight rules and price maths of every store,
+#   and every weekly file: the 10 columns, no empty cells, real prices, the right week
+#
+# Tried and tuned:
+#   - the tests run again right before the upload -> a broken weekly file never reaches Backblaze
+#   - a test for every store's weight rule -> a change in one store can't quietly break the weight style
+
 import csv
 import glob
 import os
@@ -11,8 +19,8 @@ import yaml
 
 sys.path.insert(0, "pipeline")                    # so that "import storage" finds pipeline/storage.py
 import storage
-import load                                       # pipeline/load.py: the weight rules of Kaufland and Netto
-import validate                                   # pipeline/validate.py: Netto's price maths
+import load                                       # pipeline/load.py: the weight rules of every store
+import validate                                   # pipeline/validate.py: the price maths of Netto and Lidl
 
 WEEKLY_FILES = "data/output/offers_*-W*.csv"         # one final file per week: offers_2026-W46.csv
 COLUMNS = ["week", "store", "offer_start_date", "offer_end_date", "brand",
@@ -67,6 +75,25 @@ def test_netto_price_maths():
     assert validate.netto_unit_price_fits(1.99, "500 g", "(3.98 / kg)")
     assert validate.netto_unit_price_fits(0.69, "0,5 Liter - 1 Liter", "(0.69 – 1.38 / l)")
     assert not validate.netto_unit_price_fits(2.99, "500 g", "(3.98 / kg)")
+
+
+def test_lidl_weight():
+    """Lidl's weight rule (load.py): the text after "Je" -> '100 g', '1.75 l', '2 x 100 g', 'Topf' (the same style)"""
+    assert load.lidl_weight("100 g") == "100 g"
+    assert load.lidl_weight("1,75 l") == "1.75 l"
+    assert load.lidl_weight("2x100 g") == "2 x 100 g"
+    assert load.lidl_weight("80/100 g") == "80/100 g"
+    assert load.lidl_weight("Topf") == "Topf"
+    assert load.lidl_weight("") == "UNKNOWN"
+
+
+def test_lidl_price_maths():
+    """Lidl's unit-price check (validate.py): '1 kg = 9.95' and 'Je 200 g' -> the price must be 1.99"""
+    sizes = validate.lidl_all_sizes("Je 200 g; 1 kg = 9.95")
+    unit_prices = validate.lidl_unit_prices_of("Je 200 g; 1 kg = 9.95")
+    assert validate.lidl_fits(1.99, sizes, unit_prices)
+    assert not validate.lidl_fits(2.49, sizes, unit_prices)
+    assert validate.lidl_unit_prices_of("1 WL = -.19") == [(1.0, "WL", 0.19)]
 
 
 def test_weekly_files_are_healthy():

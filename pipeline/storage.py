@@ -1,17 +1,20 @@
-# storage.py: the ONE place that knows where every file goes - the same for every store
-#   stores()          ->  ['kaufland', 'netto']                    (the stores in config/settings.yaml)
-#   flyers_folder()   ->  data/flyers/netto                        (all weekly flyers of a store)
-#   flyer_path()      ->  data/flyers/netto/netto_2026-W46.pdf     (the flyer of the week the pipeline works on)
-#   weekly_file()     ->  data/output/offers_2026-W46.csv          (the final file of one week, all stores)
-#   already_done()    ->  True if that week's file already has the store -> it is not run again
-#   store_failed()    ->  Netto fails: skipped, Kaufland goes on   (Kaufland fails: the run stops)
-# Nothing about how a flyer LOOKS is here: that is in the kaufland() and netto() functions of every stage.
-# Check it yourself:  python pipeline/storage.py
+# storage.py - the one place that knows where every file goes (the same for every store)
+#
+# How it works:
+#   flyers:   data/flyers/<store>/<store>_2026-W47.pdf   (only the newest 4 weeks are kept)
+#   result:   data/output/offers_2026-W47.csv            (one file per week, all stores)
+#   already_done() looks into that file: a store that is already in it is not read again
+#   store_failed(): the first store in settings.yaml (Kaufland) stops the run, any other store is only skipped
+#   Check it yourself:  python pipeline/storage.py
+#
+# Tried and tuned:
+#   - the flyers were in data/inbox and data/raw/<week> -> now one folder per store with the week in the file name
+#   - the paths were written inside every stage -> now every stage asks this file
+#   - nothing here knows how a flyer looks: that stays in the kaufland(), netto() and lidl() functions of each stage
 
 import os
 import re
 import csv
-import glob
 import traceback
 import yaml
 
@@ -77,23 +80,6 @@ def delete_old_flyers(store=None):
     for name in weekly_flyers(store)[:-keep]:
         os.remove(flyers_folder(store) + "/" + name)
         print("Deleted old flyer", name)
-
-
-def move_old_flyers(store=None):
-    """ONE TIME: flyers from the old folders (data/inbox/kaufland, data/raw/kaufland/2026-W46) -> data/flyers/kaufland"""
-    s = settings()
-    if store is None:
-        store = stores()[0]
-    target = flyers_folder(store)
-    old_files = glob.glob(s["data_folder"] + "/inbox/" + store + "/*.pdf") + glob.glob(s["data_folder"] + "/raw/" + store + "/*.pdf")
-    for pdf in old_files:
-        os.replace(pdf, target + "/" + os.path.basename(pdf))
-        print("Moved", pdf, "->", target)
-    for pdf in glob.glob(s["data_folder"] + "/raw/" + store + "/*/offers.pdf"):
-        week = os.path.basename(os.path.dirname(pdf))       # data/raw/kaufland/2026-W46/offers.pdf -> 2026-W46
-        if re.fullmatch(r"\d{4}-W\d\d", week):
-            os.replace(pdf, target + "/" + store + "_" + week + ".pdf")
-            print("Moved", pdf, "->", target + "/" + store + "_" + week + ".pdf")
 
 
 def output_folder():

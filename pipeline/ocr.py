@@ -1,11 +1,14 @@
-# Stage 4: read every page  -  version 3: Kaufland + Netto
-# We save not only WHAT the text says, but also HOW it looks, plus the boxes on the page:
-#   kaufland()  -> data/text/kaufland/page_N.csv + boxes_N.csv
-#   netto()     -> data/text/netto/page_N.csv + boxes_N.csv + lines_N.csv
-#                  (lines: Netto CROSSES OUT its old prices with a thin line, so Netto needs them too)
-#   page_N.csv   -> every piece of text: where it is + font, size, colour
-#   boxes_N.csv  -> every box on the page: where it is + fill colour + border colour
-# At the bottom, every store in config/settings.yaml is run. If Netto fails, Kaufland still goes on.
+# ocr.py (stage 3 of 8) - reads every page: what the text says AND how it looks
+#
+# How it works:
+#   Every piece of text is saved with its place, font, size and colour, and every drawn box too:
+#   data/text/<store>/page_N.csv + boxes_N.csv. Netto also gets lines_N.csv, Lidl bands_N.csv + pages.csv.
+#   The name says "ocr", but no OCR is needed: the flyers have real text inside, so PyMuPDF reads it directly.
+#
+# Tried and tuned:
+#   - tried real OCR (Tesseract) on the Netto page pictures: only 3-10% of the prices were readable -> not used
+#   - Netto crosses out its old prices with a thin line -> those lines are saved for Netto
+#   - Lidl prints "kg-Preis" sideways and marks bold text with flags -> Lidl saves both, and the exact text sizes
 
 import os
 import csv
@@ -153,11 +156,68 @@ def netto():
 
 
 # =====================================================================================================
+# LIDL - Lidl needs a bit more about each piece: is it bold (flags), is it turned ("kg-Preis" stands sideways),
+#        its exact size (all Lidl sizes are measured against the description size), and the coloured bands
+#        behind the date banners ("Ab Do. 19.11.")
+# =====================================================================================================
+def lidl():
+    """Lidl: every page -> page_N.csv + bands_N.csv in data/text/lidl, + pages.csv (the width of every page)"""
+    pdf_path = storage.flyer_path("lidl")           # the flyer of the week we work on: data/flyers/lidl/lidl_2026-W47.pdf
+    output_folder = "data/text/lidl"
+    os.makedirs(output_folder, exist_ok=True)
+    for old_file in glob.glob(output_folder + "/*.csv"):     # the files of the last flyer
+        os.remove(old_file)
+
+    pdf = pymupdf.open(pdf_path)
+    page_sizes = []
+    for page in pdf:
+        page_number = page.number + 1
+        page_sizes.append([page_number, round(page.rect.width, 1), round(page.rect.height, 1)])
+
+        # 1. text pieces: text with ONE look, + bold flags and turned or not
+        pieces = []
+        for block in page.get_text("dict")["blocks"]:
+            for line_number, line in enumerate(block.get("lines", [])):
+                horizontal = "yes" if abs(line["dir"][1]) < 0.3 else "no"     # "no" = turned text like "kg-Preis"
+                for span in line["spans"]:
+                    if span["text"].strip() == "":          # only spaces -> skip
+                        continue
+                    left, top, right, bottom = span["bbox"]
+                    pieces.append([span["text"], round(left, 2), round(top, 2), round(right, 2), round(bottom, 2),
+                                   span["font"], round(span["size"], 2), "#%06x" % span["color"], span["flags"],
+                                   horizontal, block["number"], line_number])
+        with open(output_folder + "/page_" + str(page_number) + ".csv", "w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.writer(file)
+            writer.writerow(["text", "left", "top", "right", "bottom", "font", "size", "color", "flags",
+                             "horizontal", "block", "line"])
+            writer.writerows(pieces)
+
+        # 2. coloured bands (filled shapes, at least 30 wide and 8 high): the band behind a date banner
+        bands = []
+        for drawing in page.get_drawings():
+            box = drawing["rect"]
+            if drawing.get("fill") and box.width >= 30 and box.height >= 8:
+                bands.append([round(box.x0, 2), round(box.y0, 2), round(box.x1, 2), round(box.y1, 2)])
+        with open(output_folder + "/bands_" + str(page_number) + ".csv", "w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.writer(file)
+            writer.writerow(["left", "top", "right", "bottom"])
+            writer.writerows(bands)
+
+        print("Page", page_number, "-", len(pieces), "text pieces,", len(bands), "coloured bands saved")
+    pdf.close()
+
+    with open(output_folder + "/pages.csv", "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.writer(file)
+        writer.writerow(["page", "width", "height"])
+        writer.writerows(page_sizes)
+
+
+# =====================================================================================================
 # RUN every store of config/settings.yaml with its own function (kaufland() and netto() above)
 # (only when started as a program - python pipeline/ocr.py - not when the tests read this file)
 # =====================================================================================================
 if __name__ == "__main__":
-    STORE_PARTS = {"kaufland": kaufland, "netto": netto}
+    STORE_PARTS = {"kaufland": kaufland, "netto": netto, "lidl": lidl}
     for store in storage.stores():
         if store not in STORE_PARTS:
             print("\n" + store + ": ocr.py has no function for this store yet - skipped")

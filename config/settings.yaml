@@ -1,6 +1,9 @@
-# Settings of the flyer pipeline - change things HERE, not inside the code
+# settings.yaml - change things here, not inside the code
+#
+# Tried and tuned:
+#   - started with one store (store: kaufland) -> now a list of stores; a new store only needs its functions in the stages
 
-stores: [kaufland, netto]   # the stores the pipeline reads, in this order. The FIRST one is the main store:
-                            # if it fails, the run stops. Another store that fails is only skipped that week.
+stores: [kaufland, netto, lidl]   # the stores the pipeline reads, in this order. The FIRST one is the main store:
+                                  # if it fails, the run stops. Another store that fails is only skipped that week.
 data_folder: data           # all data folders are inside this folder
 keep_weeks: 4               # how many weeks of original flyer PDFs to keep (older ones are deleted)

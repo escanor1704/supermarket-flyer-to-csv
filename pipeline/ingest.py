@@ -1,14 +1,16 @@
-# Stage 0: download this week's flyers of ALL stores, each store into its own folder
-#   Kaufland -> data/flyers/kaufland/kaufland_2026-W46.pdf   (the pipeline reads this one)
-#   Netto    -> data/flyers/netto/netto_2026-W46.pdf         (collected for later - no Netto rules yet)
-#   Lidl     -> data/flyers/lidl/lidl_2026-W46.pdf           (collected for later - no Lidl rules yet)
-#   ALDI Nord-> data/flyers/aldi/aldi_2026-W46.pdf           (collected for later - no ALDI rules yet)
-#   only the newest 4 weeks of each store are kept (keep_weeks in config/settings.yaml)
-# Run:
-#     python pipeline/ingest.py          -> this week (run on Sunday -> next week's flyers),
-#                                           a flyer that is already downloaded is skipped
-#     python pipeline/ingest.py 46       -> week 46, ALWAYS downloaded (good for testing)
-#     python pipeline/ingest.py "https://..."   -> TEST MODE: download ANY address into data/flyers/test/
+# ingest.py (stage 1 of 8) - downloads this week's flyers, every store into its own folder
+#
+# How it works:
+#   Kaufland, Netto, Lidl and ALDI Nord -> data/flyers/<store>/<store>_2026-W47.pdf   (ALDI is only collected for now)
+#   python pipeline/ingest.py       the week of tomorrow (on Sunday = next week); a flyer that is already there is skipped
+#   python pipeline/ingest.py 46    week 46, always downloaded again
+#   A store that fails shows up in the SUMMARY - the run goes on with the flyers you already have.
+#
+# Tried and tuned:
+#   - Kaufland and Lidl use the same flyer system (leaflets.schwarz) -> its data address gives the PDF link for both
+#   - the Lidl flyer name ends with a random code, so it can't be guessed -> it is looked up in Lidl's flyer list first
+#   - ALDI's viewer has no PDF link -> the page pictures are put into one PDF (no text inside, it needs OCR later)
+#   - REWE is on hold
 
 import os
 import re
@@ -174,18 +176,6 @@ def pdf_from_pictures(flyer_address):
     return flyer.tobytes()
 
 
-# 0. TEST MODE: an address was typed -> download it into data/flyers/test/ (never read by the pipeline)
-if len(sys.argv) > 1 and sys.argv[1].startswith("http"):
-    print("TEST MODE:", sys.argv[1])
-    pdf = get_pdf([sys.argv[1]], "ingest_test")
-    if pdf is None:
-        exit(1)
-    test_file = storage.flyers_folder("test") + "/test_flyer.pdf"
-    with open(test_file, "wb") as file:
-        file.write(pdf)
-    print("Done! Download works. Saved:", test_file, "(" + str(round(len(pdf) / 1_000_000, 1)) + " MB)")
-    exit(0)
-
 # 1. which week? the week of TOMORROW (a run on Sunday gets Monday's new flyers), or the number you typed
 today = datetime.date.today()
 if len(sys.argv) > 1:
@@ -202,7 +192,6 @@ print("Week:", week)
 results = {}
 for store, addresses in STORES.items():
     print("\n" + store.upper())
-    storage.move_old_flyers(store)                     # one time: flyers from the old folders inbox/ and raw/
     target = storage.flyers_folder(store) + "/" + store + "_" + week + ".pdf"
     if len(sys.argv) == 1 and os.path.exists(target):
         print("   already there - nothing to download")

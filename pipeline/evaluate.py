@@ -1,9 +1,12 @@
-# Stage 8: quality report - how well did this week go?  (version 5: Kaufland + Netto, one report per week)
-# Runs inside run.py right after load.py, once for EVERY week made in this run (before the clean-up).
-# Shows the FINAL numbers (after the repairs of verify.py) and adds them to logs/quality_report.txt,
-# so after an automatic weekly run you can see at one glance if everything went well.
-#   kaufland()  -> the KAUFLAND part of the report
-#   netto()     -> the NETTO part of the report
+# evaluate.py (stage 8 of 8) - the quality report: how well did this week go?
+#
+# How it works:
+#   For every store: how many products were found, how many reached the weekly file, how many are set aside.
+#   CHECK lines when something looks wrong: less than 70% made it, a page could not be read, a flyer was not downloaded.
+#   -> logs/quality_report.txt (one part per week made in this run; GitHub shows it on the run page)
+#
+# Tried and tuned:
+#   - it listed every empty page and every leftover price -> too confusing (coupon pages), now only the numbers that matter
 
 import os
 import csv
@@ -132,11 +135,67 @@ def netto(week):
 
 
 # =====================================================================================================
+# LIDL
+# =====================================================================================================
+def lidl(week):
+    """Lidl's part of the report of one week -> (lines, warnings)"""
+    review_folder = "data/review/lidl"
+    found = read_rows(review_folder + "/offers_checked.csv")          # every product (+ every price without a product)
+    final = read_rows(review_folder + "/offers_verified.csv")          # -> went into data/output/offers_<week>.csv
+    review = read_rows(review_folder + "/needs_review.csv")            # -> set aside, you look at these
+    removed = read_rows(review_folder + "/not_offers.csv")             # -> headlines, prices without a product, repeats
+    pages = read_rows("data/offers/lidl/page_summary.csv")             # what was found on each page
+    newest_week = storage.week_of(os.path.basename(storage.newest_flyer("lidl") or ""))
+
+    # the newest Lidl flyer is older than this week's? -> the download did not work
+    warnings = []
+    if newest_week is None:
+        warnings.append("no Lidl flyer at all - was it downloaded? (see the ingest SUMMARY)")
+    elif week == newest_week and week < expected_week():
+        warnings.append("the Lidl flyer of " + expected_week() + " was not downloaded - the newest one is " + week)
+
+    if not os.path.exists(storage.flyer_path("lidl", week)):
+        return ["LIDL " + week + ": no flyer of this week", ""], warnings
+    if len(found) == 0 and storage.already_done("lidl", week):
+        return ["LIDL " + week + ": already done in an earlier run -> " + storage.weekly_file(week), ""], warnings
+    if len(found) == 0:
+        return (["LIDL " + week + ": FAILED - look for its WARNING in the log above", ""],
+                warnings + ["Lidl failed in " + week + " - its offers are NOT in the final file"])
+
+    # the numbers
+    products = len(found) - len(removed)                               # real products (without headlines/repeats)
+    share = round(100 * len(final) / products) if products > 0 else 0
+    page_errors = [p["page"] + ": " + p["error"] for p in pages if p.get("error")]
+    no_price_pages = [p["page"] for p in pages if p.get("prices") == "0" and p.get("products") not in ("0", "", None)]
+
+    # what to check
+    if len(final) == 0:
+        warnings.append("NO Lidl offers reached the final file - did Lidl change the flyer design?")
+    elif share < 70:
+        warnings.append("only " + str(share) + "% of the Lidl products reached the final file - look at "
+                        + review_folder + "/needs_review.csv")
+    if page_errors:
+        warnings.append("Lidl: " + str(len(page_errors)) + " page(s) could not be read")
+
+    lines = []
+    lines.append("LIDL " + week + " - " + str(len(pages)) + " pages")
+    lines.append("Products found on the flyer:   " + str(products))
+    lines.append("In the final file:             " + str(len(final)) + "  (" + str(share) + "%)  -> " + storage.weekly_file(week))
+    lines.append("Set aside, please check:       " + str(len(review)) + "  -> " + review_folder + "/needs_review.csv")
+    if no_price_pages:
+        lines.append("Pages with no price as text:   " + ", ".join(no_price_pages) + "  (the prices there are pictures)")
+    for error in page_errors:
+        lines.append("Page error:                    page " + error)
+    lines.append("")
+    return lines, warnings
+
+
+# =====================================================================================================
 # RUN: the report of the week the pipeline is working on (data/current_week.txt), every store, then the verdict
 # (only when started as a program - python pipeline/evaluate.py - not when the tests read this file)
 # =====================================================================================================
 if __name__ == "__main__":
-    STORE_PARTS = {"kaufland": kaufland, "netto": netto}
+    STORE_PARTS = {"kaufland": kaufland, "netto": netto, "lidl": lidl}
 
     # was there any result at all? (after the clean-up the work files are gone)
     if not any(os.path.exists("data/review/" + store + "/offers_checked.csv") for store in storage.stores()):

@@ -1,13 +1,17 @@
-# Weekly flyer pipeline on GitHub's computers (your PC can be off)
-# The run page shows 3 boxes:   Build  ->  Test  ->  Deliver
-#   Source  -> every Sunday 06:07 (Berlin time), or the "Run workflow" button
-#   Build   -> get the code, install the packages
-#   Test    -> quick tests; one fails = stop (nothing is stored)
-#   Deliver -> check the Backblaze key, run.py makes this week's offers, test them,
-#              store them in Backblaze B2 as weekly/offers_<week>.csv
-#   Deploy  -> none yet
-# When you push new code, only Build + Test run (Deliver is shown as "skipped").
-# Every box runs on its OWN fresh GitHub computer, so each box gets the code and installs the packages.
+# weekly.yml - the weekly flyer pipeline on GitHub's computers (my PC can be off)
+#
+# How it works:   Build -> Test -> Deliver   (3 boxes on the run page, each on its own fresh computer)
+#   when:     every Sunday 06:07 Berlin time, or the "Run workflow" button
+#   Build     get the code, install the packages
+#   Test      the quick tests - one fails = stop, nothing is stored
+#   Deliver   run.py makes the new week's file, the tests check it, then it goes to Backblaze B2 as weekly/offers_<week>.csv
+#   A push of new code only runs Build + Test (Deliver shows as "skipped").
+#   The Backblaze keys come from GitHub Secrets (B2_KEY_ID, B2_APP_KEY) - never type them into this file.
+#
+# Tried and tuned:
+#   - it was one big "weekly" box -> split into Build, Test, Deliver, so I can see where it broke
+#   - Backblaze said "Seed signature is invalid" -> fixed with the two checksum lines below and a new key without spaces
+#   - first it downloaded offers.csv from Backblaze to add to it (403 error) -> now it only stores, one file per week
 
 name: Weekly flyer pipeline
 
@@ -82,7 +86,7 @@ jobs:
       # ----- YOUR KEYS: they come from GitHub Secrets - never type the keys into this file -----
       AWS_ACCESS_KEY_ID: ${{ secrets.B2_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.B2_APP_KEY }}
-      # send files the normal way (Backblaze does not accept the new "chunked" way)
+      # send files the normal way (Backblaze does not accept the new "chunked" way of the AWS tool)
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
       AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
     steps:
@@ -98,45 +102,14 @@ jobs:
       - name: Install the packages
         run: python -m pip install -r requirements.txt "pytest>=9,<10"
 
-      - name: Check the Backblaze key
-        run: |
-          python - <<'EOF'
-          import base64, json, os, urllib.request, urllib.error
-          key_id = os.environ["AWS_ACCESS_KEY_ID"].strip()          # .strip() removes copied spaces
-          app_key = os.environ["AWS_SECRET_ACCESS_KEY"].strip()
-          pair = key_id + ":" + app_key
-          request = urllib.request.Request(
-              "https://api.backblazeb2.com/b2api/v3/b2_authorize_account",
-              headers={"Authorization": "Basic " + base64.b64encode(pair.encode()).decode()})
-          try:
-              answer = json.load(urllib.request.urlopen(request, timeout=30))
-          except urllib.error.HTTPError as error:
-              print("KEY NOT ACCEPTED by Backblaze:", error.code, error.read().decode()[:200])
-              print("-> make a new application key: keyID into B2_KEY_ID, applicationKey into B2_APP_KEY")
-              raise SystemExit(1)
-          storage = answer.get("apiInfo", {}).get("storageApi", {})
-          allowed = storage.get("allowed", {})
-          capabilities = allowed.get("capabilities")
-          print("Key accepted by Backblaze")
-          print("  buckets:     ", [bucket.get("name") for bucket in allowed.get("buckets") or []] or "all buckets")
-          print("  capabilities:", capabilities)
-          print("  S3 endpoint: ", storage.get("s3ApiUrl"))
-          if capabilities is not None and "writeFiles" not in capabilities:
-              print("-> this key is NOT allowed to write files - make a new key with Read and Write")
-              raise SystemExit(1)
-          EOF
-
-      - name: Make this week's offers
+      - name: Make the new week's offers
         run: python run.py
 
-      - name: Test the new offers before storing them
+      - name: Test the new weekly file before storing it
         run: python -m pytest -v tests/test_quick.py
 
       - name: Store this week's offers in Backblaze B2
         run: |
-          # remove copied spaces / line breaks from the keys (real keys never contain spaces)
-          export AWS_ACCESS_KEY_ID="$(echo "$AWS_ACCESS_KEY_ID" | tr -d '[:space:]')"
-          export AWS_SECRET_ACCESS_KEY="$(echo "$AWS_SECRET_ACCESS_KEY" | tr -d '[:space:]')"
           WEEK=$(cat data/current_week.txt)
           aws s3 cp "data/output/offers_$WEEK.csv" "s3://$B2_BUCKET/weekly/offers_$WEEK.csv" --endpoint-url "$B2_ENDPOINT"
 

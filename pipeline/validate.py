@@ -1,8 +1,16 @@
-# Stage 6: clean each offer and check if its numbers make sense  -  version 3: Kaufland + Netto
-# Each store has its own function with its own checks (Netto uses nothing from the Kaufland part):
-#   kaufland()  -> data/review/kaufland/offers_checked.csv
-#   netto()     -> data/review/netto/offers_checked.csv
-# At the bottom, every store in config/settings.yaml is run. If Netto fails, Kaufland still goes on.
+# validate.py (stage 5 of 8) - cleans every offer and checks if its numbers make sense
+#
+# How it works:
+#   The main check is the flyer's own maths: price / size = the printed unit price (1.99 for 500 g = 3.98 per kg).
+#   The old price must be higher than the offer price, and the -XX% must fit both.
+#   Every store has its own function, because each one prints these numbers differently.
+#   -> data/review/<store>/offers_checked.csv  (check = ok / please check)
+#
+# Tried and tuned:
+#   - flyers round their unit prices -> 1% or 1 cent difference is allowed
+#   - Kaufland "15 x 9-St.-Packg." = 135 pieces -> pack sizes are multiplied out
+#   - Netto prints ranges "(0.69 – 1.38 / l)" and "2 für" offers -> both can fit
+#   - Lidl "Normalpreis: 2.49" next to a big Lidl Plus price -> the offer price is the Normalpreis
 
 import os
 import csv
@@ -407,11 +415,219 @@ def netto():
 
 
 # =====================================================================================================
+# LIDL - Lidl's own checks (nothing from the other parts):
+#   price / size = the printed unit price "1 kg = 19.90"   (also "1 kg = 24.88/19.90" and "kg-Preis = 7.99")
+#   the old price ("2.99" next to "-33%", "UVP 47.99") must be higher than the offer price, and the -XX% must fit
+#   "Normalpreis: 2.49" next to a big Lidl Plus price -> the offer price is the Normalpreis
+# =====================================================================================================
+# a size: "100 g", "2x100 g", "12x 12.5 g", "1,75 l", "80 WL"   and a unit price: "1 kg = 19.90", "kg-Preis = 7.99"
+LIDL_NUMBER = r"\d+(?:,\d+|\.\d{1,2}(?!\d))?"                  # "100", "1,5", "12.5"  (but not "1.050")
+LIDL_UNIT = r"(?:kg|g|ml|cl|l|Liter|Stück|St\.|m|Meter|WL|Blatt|Rollen)(?![A-Za-zäöüß])"
+LIDL_PRICE_VALUE = r"(?:\d+|[-–])\.\d\d"
+LIDL_UNIT_PRICE = r"(\d+(?:,\d+)?)\s?(kg|g|l|ml|m|WL)\s?=\s?(" + LIDL_PRICE_VALUE + r"(?:\s?/\s?" + LIDL_PRICE_VALUE + r")*)"
+LIDL_KG_PRICE = r"\b(kg|l|100-g)-Preis\s?=?\s?(\d+\.\d\d)"
+
+
+def lidl_to_number(text):
+    """'1.49' -> 1.49 ,  '' -> None"""
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def lidl_price_value(text):
+    """'19.90' -> 19.9 ,  '-.19' -> 0.19"""
+    text = text.strip().replace("–", "-")
+    if text.startswith("-."):
+        text = "0" + text[1:]
+    return float(text)
+
+
+def lidl_sizes_of(text):
+    """every '100 g', '2x100 g', '12x 12.5 g', '1,75 l', '80 WL' in a text -> [(0.1, 'kg'), (0.2, 'kg'), ...]"""
+    result = []
+    for count, amount, unit in re.findall(r"(?:(\d+)\s?x\s?)?(" + LIDL_NUMBER + r")\s?(" + LIDL_UNIT + r")", text):
+        total = float(amount.replace(",", ".")) * (int(count) if count else 1)
+        if unit == "g":
+            result.append((total / 1000, "kg"))
+        elif unit == "ml":
+            result.append((total / 1000, "l"))
+        elif unit == "cl":
+            result.append((total / 100, "l"))
+        elif unit in ["l", "Liter"]:
+            result.append((total, "l"))
+        else:
+            result.append((total, unit))
+    return result
+
+
+def lidl_all_sizes(text):
+    """EVERY size written in a description (the unit prices themselves are left out):
+    'Je 80/100 g' -> 80 g and 100 g ,  'Je 1 kg; Abtropfgewicht: 900 g' -> 1 kg and 900 g ,  'Ca. 580 g' -> 580 g"""
+    text = re.sub(LIDL_UNIT_PRICE, " ", text)
+    text = re.sub(LIDL_KG_PRICE, " ", text)
+    result = []
+    for numbers, unit in re.findall(r"(\d+(?:,\d+)?(?:\s?/\s?\d+(?:,\d+)?)+)\s?(kg|g|ml|cl|l|WL)(?![A-Za-zäöüß])", text):
+        for number in numbers.split("/"):
+            result = result + lidl_sizes_of(number.strip() + " " + unit)     # "80/100 g": both numbers get the unit
+    return result + lidl_sizes_of(text)
+
+
+def lidl_unit_prices_of(text):
+    """'1 kg = 19.90' -> [(1, 'kg', 19.9)] ,  '1 kg = 24.88/19.90' -> two ,  '1 WL = -.19' -> [(1, 'WL', 0.19)] ,
+    'kg-Preis = 7.99' -> [(1, 'kg', 7.99)]"""
+    result = []
+    for amount, unit, values in re.findall(LIDL_UNIT_PRICE, text):
+        base = float(amount.replace(",", "."))
+        base_unit = unit
+        if unit == "g":
+            base, base_unit = base / 1000, "kg"
+        elif unit == "ml":
+            base, base_unit = base / 1000, "l"
+        for value in values.split("/"):
+            result.append((base, base_unit, lidl_price_value(value)))
+    for kind, value in re.findall(LIDL_KG_PRICE, text):
+        if kind == "100-g":
+            result.append((0.1, "kg", float(value)))
+        else:
+            result.append((1.0, kind, float(value)))
+    return result
+
+
+def lidl_fits(price, sizes, unit_prices):
+    """True if price / size = a printed unit price, for ANY size and ANY unit price (1% or 1 cent for rounding)"""
+    if price is None:
+        return False
+    for base, base_unit, unit_price in unit_prices:
+        for size, size_unit in sizes:
+            if size_unit == base_unit and size > 0:
+                if abs(price / size * base - unit_price) <= max(unit_price * 0.01, 0.01):
+                    return True
+    return False
+
+
+def lidl_check(row):
+    """the checks of one Lidl offer -> (offer price, old price, discount, problems, notes)
+    With "Normalpreis: 2.49" Lidl prints the Lidl Plus price big: then the offer price is the Normalpreis
+    (the price everybody pays) and the big price is the Lidl Plus price.
+    When the unit price CONFIRMS the offer price, an old price / discount that does not fit came from a neighbour:
+    it is removed (written in the notes) instead of sending the offer to review."""
+    normal = lidl_to_number(row["normal_price_eur"])
+    app = lidl_to_number(row["lidl_plus_price_eur"])
+    if normal is not None:                                 # the old price and -XX% of the price box (normal box first)
+        old, discount = lidl_to_number(row["normal_old_eur"]), lidl_to_number(row["normal_discount_pct"])
+    elif app is not None:
+        old, discount = lidl_to_number(row["lidl_plus_old_eur"]), lidl_to_number(row["lidl_plus_discount_pct"])
+    else:
+        old, discount = None, None
+    sizes = lidl_all_sizes(row["description"]) + lidl_sizes_of(row["weight_box_size"])
+    unit_prices = lidl_unit_prices_of(row["description"])
+    problems = []
+    notes = [note for note in row["structure_notes"].split("; ") if note]
+    if normal is None and app is not None and "Normalpreis" in row["description"]:
+        found = re.search(r"Normalpreis:?\s?(\d+\.\d\d)", row["description"])
+        if found:
+            normal = float(found.group(1))
+        elif old is not None:
+            normal, old = old, None                        # the number next to "Normalpreis:" was read as old price
+        if normal is not None:
+            notes.append("normal price from 'Normalpreis'")
+        if old is not None and normal is not None and abs(old - normal) < 0.005:
+            old = None                                     # the same number twice
+    offer = normal if normal is not None else app
+    confirmed = False
+    if offer is None:
+        problems.append("no price")
+    if unit_prices and offer is not None:
+        if lidl_fits(offer, sizes, unit_prices):
+            notes.append("unit price fits")
+            confirmed = True
+        elif app is not None and lidl_fits(app, sizes, unit_prices):
+            notes.append("unit price fits the Lidl Plus price")
+            confirmed = True
+        else:
+            problems.append("price and unit price do not match")
+    elif offer is not None:
+        notes.append("not checked: no unit price printed")
+    if old is not None and offer is not None:
+        wrong = ""
+        if old <= offer:
+            wrong = "old price is not higher than offer price"
+        elif discount is not None:
+            percent = (1 - offer / old) * 100
+            if min(abs(int(percent) - discount), abs(round(percent) - discount)) > 1:
+                wrong = "discount does not match prices"
+        if wrong and confirmed:
+            removed = "old price " + f"{old:.2f}"
+            if discount is not None:
+                removed = removed + " and -" + str(int(discount)) + "%"
+            notes.append(removed + " removed: " + wrong + " (the offer price fits the unit price)")
+            old, discount = None, None
+        elif wrong:
+            problems.append(wrong)
+    return offer, old, discount, problems, notes
+
+LIDL_COLUMNS = ["week", "store", "page", "brand", "product_name", "weight", "unit_price",
+                "offer_price_eur", "old_price_eur", "discount_pct",
+                "normal_price_eur", "normal_old_eur", "normal_discount_pct", "normal_per", "normal_weight_box", "normal_colour",
+                "lidl_plus_price_eur", "lidl_plus_old_eur", "lidl_plus_discount_pct", "weight_box_size", "labels",
+                "valid_from", "valid_to", "description", "structure_notes", "price_candidates", "check", "problems", "notes"]
+
+
+def lidl():
+    """Lidl: data/offers/lidl/offers.csv -> data/review/lidl/offers_checked.csv"""
+    STORE = "lidl"
+    input_file = "data/offers/lidl/offers.csv"
+    output_folder = "data/review/lidl"
+    os.makedirs(output_folder, exist_ok=True)
+    pipeline_week = storage.current_week()            # for a flyer without the footer "47/2026"
+
+    clean_rows = []
+    with open(input_file, encoding="utf-8-sig") as file:
+        for row in csv.DictReader(file):
+            try:                      # if one offer causes an error, mark it and go on with the next one
+                r = {}
+                for column in LIDL_COLUMNS:
+                    r[column] = row.get(column, "")
+                r["store"] = STORE
+                if not re.fullmatch(r"\d{4}-W\d\d", r["week"]):
+                    r["week"] = pipeline_week
+
+                # the checks: price / size = unit price, old price higher, the -XX% fits
+                offer, old, discount, problems, notes = lidl_check(r)
+                if r["product_name"] == "":
+                    problems.append("no product name (a price box that no product took)")
+                r["offer_price_eur"] = f"{offer:.2f}" if offer is not None else ""
+                r["old_price_eur"] = f"{old:.2f}" if old is not None else ""
+                r["discount_pct"] = str(int(discount)) if discount is not None else ""
+                r["check"] = "please check" if problems else "ok"
+                r["problems"] = "; ".join(problems)
+                r["notes"] = "; ".join(notes)
+                clean_rows.append(r)
+                print((r["brand"] + " " + r["product_name"]).strip() or "(price without a product)", "|", r["weight"],
+                      "|", r["offer_price_eur"], "|", r["check"])
+            except Exception as error:
+                clean_rows.append({"store": STORE, "page": row.get("page", ""), "product_name": row.get("product_name", ""),
+                                   "check": "please check", "problems": "could not process this offer: " + str(error)})
+                print("ERROR on page", row.get("page", ""), "-", row.get("product_name", ""), "->", error)
+
+    # save the clean table
+    with open(output_folder + "/offers_checked.csv", "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=LIDL_COLUMNS, restval="")     # restval: empty cell if a value is missing
+        writer.writeheader()
+        writer.writerows(clean_rows)
+
+    ok_count = sum(1 for r in clean_rows if r["check"] == "ok")
+    print("Done!", len(clean_rows), "Lidl rows:", ok_count, "ok,", len(clean_rows) - ok_count, "please check")
+
+
+# =====================================================================================================
 # RUN every store of config/settings.yaml with its own function (kaufland() and netto() above)
 # (only when started as a program - python pipeline/validate.py - not when the tests read this file)
 # =====================================================================================================
 if __name__ == "__main__":
-    STORE_PARTS = {"kaufland": kaufland, "netto": netto}
+    STORE_PARTS = {"kaufland": kaufland, "netto": netto, "lidl": lidl}
     for store in storage.stores():
         if store not in STORE_PARTS:
             print("\n" + store + ": validate.py has no function for this store yet - skipped")

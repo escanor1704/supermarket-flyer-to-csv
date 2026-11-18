@@ -1,9 +1,19 @@
-# Stage 5: group the text into offers (one row per product)  -  version 4: Kaufland + Netto
-# We use how the text LOOKS on the flyer. Each flyer has its own structure, so each store has its own function
-# with its own helpers (Netto uses nothing from the Kaufland part, and Kaufland nothing from the Netto part):
-#   kaufland()  -> data/offers/kaufland/offers.csv + page_summary.csv
-#   netto()     -> data/offers/netto/offers.csv    + page_summary.csv
-# At the bottom, every store in config/settings.yaml is run. If Netto fails, Kaufland still goes on.
+# structure.py (stage 4 of 8) - turns the text pieces into offers, one row per product
+#
+# How it works:
+#   Every flyer has its own look, so every store has its own function (no store uses another store's helpers):
+#   kaufland()   name = bold size 8, weight = the line that starts with "je", price = big heavy text in the red box
+#   netto()      name in FrankfurterEF, unit price "(2.38 / kg)" under it, price = big euros + small cents in a box
+#   lidl()       all sizes measured against the description text, prices in yellow/red, dates from the
+#                "Ab Do. 19.11." banners, Lidl Plus = the price under "Mit Lidl Plus"
+#   Each one writes data/offers/<store>/offers.csv + page_summary.csv.
+#
+# Tried and tuned:
+#   - tried Docling (an AI reader) on Kaufland: only 23% of the offers matched -> PyMuPDF with the fonts stays
+#   - Netto without fonts and colours lost 62 crossed-out old prices -> the look is used for every store
+#   - Netto: the unit price decides first which price box belongs to a product, the position only second
+#   - Lidl: online pages print the price far from the text -> a 2nd round looks further away;
+#     dark blue Lidl Plus prices are kept as spare prices
 
 import os
 import csv
@@ -928,11 +938,843 @@ def netto():
 
 
 # =====================================================================================================
+# LIDL - how the text LOOKS on a Lidl flyer  (everything here is Lidl's own: nothing from the other parts)
+#   brand        = CAPITAL bold words at the start of the name -> "DELUXE", "CHEF SELECT", "METZGERFRISCH"
+#   product name = bold lines                                  -> "Italienische Wurstspezialität"
+#   description  = normal (not bold) small lines under it      -> "Versch. Sorten. Gekühlt.", "Ursprung: Spanien"
+#   weight       = the text after "Je" (or "Ca.")              -> "Je 100 g", "Je 80/100 g", "Je Topf", "Ca. 580 g"
+#   unit price   = "1 kg = 19.90", "1 kg = 24.88/19.90", "1 WL = -.19", "kg-Preis = 7.99"
+#   price        = BIG euros "1." + smaller cents "99", printed in YELLOW or RED -> 1.99  (stars "*", "d)" are skipped)
+#   Lidl Plus    = the price right under "Mit Lidl Plus" (any colour); "Normalpreis: 2.49" = the price WITHOUT Lidl Plus
+#   old price    = small grey "2.99" next to the "-33%" box, or "UVP 47.99"
+#   dates        = BIG banners per SECTION: "Ab Mo. 16.11.", "Ab Do. 19.11." -> the nearest banner ABOVE the product
+#                  in its column; the year comes from the footer "47/2026"
+# All sizes are measured against D = the size of the description text ("Je 100 g"), so it works for every page.
+# =====================================================================================================
+LIDL_BOLD_WORDS = ["Bold", "Black", "Heavy", "Semibold", "SemiBold", "Demi", "ExtraBold", "Extrabold"]
+LIDL_NOT_BRANDS = ["BIO", "XXL", "NEU", "NEW", "MSC", "ASC"]   # capital words that are not a brand
+LIDL_LABELS = ["Aktion", "Nur online", "Auch online", "Tiefpreis", "Probierpreis", "Super Sonntag"]
+LIDL_PER_LABELS = {"kg-Preis": "1 kg", "100-g-Preis": "100 g", "l-Preis": "1 l"}    # turned text next to a price
+LIDL_PRICE_COLOURS = ["yellow", "red"]                         # Lidl prints its prices in these colours
+LIDL_FOOTNOTE = r"\*{0,2} ?[a-z0-9]{0,2}\)|\*{1,2}|[¹²³⁴⁵⁶⁷⁸⁹⁰]{1,2}"     # a piece that is only "*", "tt)", "*d)", "1)"
+LIDL_STAR = r"\s?\*{0,2}\s?(?:[a-z0-9]{1,2}\)|[¹²³⁴⁵⁶⁷⁸⁹⁰]{1,2})?"        # "*", "* tt)", "*d)", "*1)" at the end of a price
+LIDL_PREFIX = r"(?:(?:ab|nur|je|Ab|Nur|Je)\s)?"                # "nur 4.99", "ab 9.99"
+LIDL_WEEKDAY = r"(?:Mo|Di|Mi|Do|Fr|Sa|So)\."
+LIDL_WHOLE_PRICE = LIDL_PREFIX + r"(\d{1,4}|[-–])\.(\d\d)" + LIDL_STAR                # "1.99", "-.99", "nur 4.99*"
+LIDL_EURO_PIECE = LIDL_PREFIX + r"(\d{1,3}(?:\.\d{3})*|[-–])\.?([-–]?)" + LIDL_STAR   # only the euros: "1." (+ "99"), "249.-"
+# a size: "100 g", "2x100 g", "12x 12.5 g", "1,75 l", "80 WL"
+LIDL_NUMBER = r"\d+(?:,\d+|\.\d{1,2}(?!\d))?"                  # "100", "1,5", "12.5"  (but not "1.050")
+LIDL_UNIT = r"(?:kg|g|ml|cl|l|Liter|Stück|St\.|m|Meter|WL|Blatt|Rollen)(?![A-Za-zäöüß])"
+LIDL_AMOUNT = r"(?:\d+\s?x\s?)?" + LIDL_NUMBER + r"\s?" + LIDL_UNIT
+LIDL_SIZE = r"(?:" + LIDL_NUMBER + r"\s?[–-]\s?)?" + LIDL_AMOUNT + r"(?:\s?[–-]\s?" + LIDL_AMOUNT + r")?"
+# a unit price: "1 kg = 19.90", "1 kg = 24.88/19.90", "1 WL = -.19/-.21"   and   "kg-Preis = 7.99"
+LIDL_PRICE_VALUE = r"(?:\d+|[-–])\.\d\d"
+LIDL_UNIT_PRICE = r"(\d+(?:,\d+)?)\s?(kg|g|l|ml|m|WL)\s?=\s?(" + LIDL_PRICE_VALUE + r"(?:\s?/\s?" + LIDL_PRICE_VALUE + r")*)"
+LIDL_KG_PRICE = r"\b(kg|l|100-g)-Preis\s?=?\s?(\d+\.\d\d)"
+# where the weight text after "Je" ends
+LIDL_WEIGHT_STOP = r";| zzgl\.| Abtropf| Normalpreis| Standardpackung| Entspricht| \d+(?:,\d+)? ?(?:kg|g|l|ml|m|WL) ?=|\. "
+
+
+def lidl_clean(text):
+    """thin spaces -> normal spaces (the invisible soft hyphen is handled in lidl_make_lines)"""
+    return text.replace("\u2009", " ").replace("\u202f", " ").replace("\xa0", " ")
+
+
+def lidl_gap(a, b):
+    """distance between two boxes (0 if they touch or overlap)"""
+    dx = max(0, a["left"] - b["right"], b["left"] - a["right"])
+    dy = max(0, a["top"] - b["bottom"], b["top"] - a["bottom"])
+    return (dx ** 2 + dy ** 2) ** 0.5
+
+
+def lidl_price_value(text):
+    """'19.90' -> 19.9 ,  '-.19' -> 0.19"""
+    text = text.strip().replace("–", "-")
+    if text.startswith("-."):
+        text = "0" + text[1:]
+    return float(text)
+
+
+def lidl_colour_name(code):
+    """the colour of a text piece (ocr.py saves it as '#fff000'): 'yellow', 'red', or its code ('#ffffff' = white)"""
+    try:
+        color = int(code.lstrip("#"), 16)
+    except ValueError:
+        return "unknown"
+    r, g, b = (color >> 16) & 255, (color >> 8) & 255, color & 255
+    if r >= 200 and g >= 160 and b <= 120:
+        return "yellow"                                    # Lidl yellow, about #fff000
+    if r >= 160 and g <= 100 and b <= 120:
+        return "red"                                       # Lidl red, about #e60a14
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+def lidl_join_lines(lines):
+    """join lines into one text:
+    a soft hyphen at the line end joins the word ('Weih' + 'nachtsmann' -> 'Weihnachtsmann', 'METZ' + 'GER' + 'FRISCH');
+    a normal hyphen before a small letter too ('Wurst-' + 'spezialität' -> 'Wurstspezialität')"""
+    result = ""
+    for line in lines:
+        line = line.strip()
+        if line == "":
+            continue
+        if result.endswith("\xad"):
+            result = result[:-1] + line
+        elif result.endswith("-") and line[:1].islower() and line.split()[0] not in ["und", "oder"]:
+            result = result[:-1] + line
+        elif result.endswith("-") or result == "":
+            result = result + line
+        else:
+            result = result + " " + line
+    return " ".join(result.replace("\xad", "").split())
+
+
+def lidl_sizes_of(text):
+    """every '100 g', '2x100 g', '12x 12.5 g', '1,75 l', '80 WL' in a text -> [(0.1, 'kg'), (0.2, 'kg'), ...]"""
+    result = []
+    for count, amount, unit in re.findall(r"(?:(\d+)\s?x\s?)?(" + LIDL_NUMBER + r")\s?(" + LIDL_UNIT + r")", text):
+        total = float(amount.replace(",", ".")) * (int(count) if count else 1)
+        if unit == "g":
+            result.append((total / 1000, "kg"))
+        elif unit == "ml":
+            result.append((total / 1000, "l"))
+        elif unit == "cl":
+            result.append((total / 100, "l"))
+        elif unit in ["l", "Liter"]:
+            result.append((total, "l"))
+        else:
+            result.append((total, unit))
+    return result
+
+
+def lidl_all_sizes(text):
+    """EVERY size written in a description (the unit prices themselves are left out):
+    'Je 80/100 g' -> 80 g and 100 g ,  'Je 1 kg; Abtropfgewicht: 900 g' -> 1 kg and 900 g ,  'Ca. 580 g' -> 580 g"""
+    text = re.sub(LIDL_UNIT_PRICE, " ", text)
+    text = re.sub(LIDL_KG_PRICE, " ", text)
+    result = []
+    for numbers, unit in re.findall(r"(\d+(?:,\d+)?(?:\s?/\s?\d+(?:,\d+)?)+)\s?(kg|g|ml|cl|l|WL)(?![A-Za-zäöüß])", text):
+        for number in numbers.split("/"):
+            result = result + lidl_sizes_of(number.strip() + " " + unit)     # "80/100 g": both numbers get the unit
+    return result + lidl_sizes_of(text)
+
+
+def lidl_unit_prices_of(text):
+    """'1 kg = 19.90' -> [(1, 'kg', 19.9)] ,  '1 kg = 24.88/19.90' -> two ,  '1 WL = -.19' -> [(1, 'WL', 0.19)] ,
+    'kg-Preis = 7.99' -> [(1, 'kg', 7.99)]"""
+    result = []
+    for amount, unit, values in re.findall(LIDL_UNIT_PRICE, text):
+        base = float(amount.replace(",", "."))
+        base_unit = unit
+        if unit == "g":
+            base, base_unit = base / 1000, "kg"
+        elif unit == "ml":
+            base, base_unit = base / 1000, "l"
+        for value in values.split("/"):
+            result.append((base, base_unit, lidl_price_value(value)))
+    for kind, value in re.findall(LIDL_KG_PRICE, text):
+        if kind == "100-g":
+            result.append((0.1, "kg", float(value)))
+        else:
+            result.append((1.0, kind, float(value)))
+    return result
+
+
+def lidl_fits(price, sizes, unit_prices):
+    """True if price / size = a printed unit price, for ANY size and ANY unit price (1% or 1 cent for rounding)"""
+    if price is None:
+        return False
+    for base, base_unit, unit_price in unit_prices:
+        for size, size_unit in sizes:
+            if size_unit == base_unit and size > 0:
+                if abs(price / size * base - unit_price) <= max(unit_price * 0.01, 0.01):
+                    return True
+    return False
+
+
+def lidl_weight_text(description):
+    """the weight as written: 'Je 80/100 g; 1 kg = ...' -> '80/100 g' ,  'Je Topf' -> 'Topf' ,
+    'Je ca. Ø 2 x H 30 cm. Je Set' -> 'Set' ,  'JeSet' -> 'Set' ,  'Ca. 580 g' -> 'ca. 580 g' ,  'kg-Preis' -> '1 kg'"""
+    candidates = []
+    for match in re.finditer(r"\bJe\s*(?=[A-ZÄÖÜ0-9])", description):
+        candidates.append(re.split(LIDL_WEIGHT_STOP, description[match.end():])[0].strip(" .,"))
+    for weight in candidates:
+        if re.match(LIDL_SIZE, weight):
+            return weight                                  # a "Je" with a size wins ("Je 100 g")
+    if candidates:
+        return candidates[-1]                              # otherwise the last one ("Je Stück", "Je Set")
+    ca = re.search(r"\b[Cc]a\. ?(" + LIDL_AMOUNT + ")", description)
+    if ca:
+        return "ca. " + ca.group(1)
+    if re.search(r"\bkg-Preis\b", description):
+        return "1 kg"                                      # "Klasse I; kg-Preis" = the price is per kg
+    return ""
+
+
+def lidl_make_lines(pieces):
+    """pieces of the same PDF line -> one line with its text, its biggest piece ("main") and its box.
+    A soft hyphen at the end of a line is kept as a mark (lidl_join_lines then joins the word with the next line)."""
+    groups = {}
+    for p in pieces:
+        groups.setdefault((p["block"], p["line"]), []).append(p)
+    lines = []
+    for line_pieces in groups.values():
+        raw = lidl_clean(" ".join(p["text"] for p in line_pieces))
+        soft = raw.rstrip().endswith("\xad")
+        text = " ".join(raw.replace("\xad", "").split())
+        if soft:
+            text = text + "\xad"
+        main = max(line_pieces, key=lambda p: len(p["word"]))
+        lines.append({"text": text, "pieces": line_pieces, "main": main, "used": False,
+                      "left": min(p["left"] for p in line_pieces), "right": max(p["right"] for p in line_pieces),
+                      "top": min(p["top"] for p in line_pieces), "bottom": max(p["bottom"] for p in line_pieces)})
+    return lines
+
+
+def lidl_read_price(p, pieces, colour_rule):
+    """a price that STARTS at piece p -> (value, right edge, cents piece or None), or None if p is not a price.
+    '1.99' in one piece, or the euros '1.' + the smaller cents '99' right next to it (top half), or '249.-'.
+    With the colour rule ON the cents must have the same colour as the euros."""
+    match = re.fullmatch(LIDL_WHOLE_PRICE, p["word"])
+    if match:
+        euros = "0" if match.group(1) in ["-", "–"] else match.group(1)
+        return float(euros + "." + match.group(2)), p["right"], None
+    match = re.fullmatch(LIDL_EURO_PIECE, p["word"])
+    if match is None:
+        return None
+    euros = "0" if match.group(1) in ["-", "–"] else match.group(1).replace(".", "")
+    if match.group(2):
+        return float(euros + ".00"), p["right"], None     # "249.-" = 249.00
+    for c in pieces:
+        if c is p or c["used"] or c["size"] > p["size"]:
+            continue
+        if colour_rule and c["colour"] != p["colour"]:
+            continue                                       # the cents have the SAME colour as the euros
+        if p["right"] - p["size"] * 0.4 <= c["left"] <= p["right"] + p["size"] * 0.35 \
+                and p["top"] - p["size"] * 0.2 <= c["top"] <= (p["top"] + p["bottom"]) / 2:
+            cents_match = re.fullmatch(r"\.?(\d\d)" + LIDL_STAR, c["word"])
+            if cents_match:
+                return float(euros + "." + cents_match.group(1)), max(p["right"], c["right"]), c
+            if re.fullmatch(r"[-–]+" + LIDL_STAR, c["word"]):
+                return float(euros + ".00"), max(p["right"], c["right"]), c
+    return None
+
+
+def lidl_to_date(day, month, year, monday):
+    """'16.11.' -> 2026-11-16  (the year from the footer; a date far from the flyer week belongs to the next/last year)"""
+    try:
+        date = datetime.date(year, month, day)
+        if (date - monday).days > 180:
+            date = date.replace(year=year - 1)
+        elif (monday - date).days > 180:
+            date = date.replace(year=year + 1)
+        return date
+    except ValueError:
+        return None
+
+
+def lidl_continues_above(line, lines, D):
+    """True if the line just above ends with '/' or '=' ('1 kg = 3.45/2.79/' + '2.60'):
+    then this number belongs to that unit price - it is NOT an old price"""
+    for other in lines:
+        if other is line:
+            continue
+        above = -0.3 * D <= line["top"] - other["bottom"] <= 0.9 * D and abs(other["left"] - line["left"]) <= 3 * D
+        if above and other["text"].rstrip("\xad ").endswith(("/", "=")):
+            return True
+    return False
+
+
+def lidl_dates_for(thing, banners, main_dates):
+    """the nearest date banner ABOVE a product (or a price) in its column; no banner -> the main dates"""
+    best = None
+    for banner in banners:
+        if banner["bottom"] <= thing["top"] + 2 and banner["left"] < thing["right"] and banner["right"] > thing["left"]:
+            if best is None or banner["bottom"] > best["bottom"]:
+                best = banner
+    if best is None:
+        return main_dates
+    end = best["end"] or main_dates[1]                    # "Ab Do. 19.11." -> until the end of the flyer week
+    if end < best["start"]:
+        end = best["start"]
+    return best["start"], end
+
+
+def lidl_money(value):
+    """1.5 -> '1.50' ,  None -> ''"""
+    if value is None:
+        return ""
+    return f"{value:.2f}"
+
+
+def lidl_row(week, page, product, box, app_box, start, end):
+    """one row of data/offers/lidl/offers.csv: the product text + its price box + its Lidl Plus price box
+    (product None = a price box that no product took - verify.py may still give it to a product)"""
+    if product is None:
+        product = {"brand": "", "name": "", "description": "", "weight": "", "unit_price": "", "weight_box_size": "",
+                   "labels": [], "extra_notes": [], "price_candidates": ""}
+    return {
+        "week": week,
+        "page": page,
+        "brand": product["brand"],
+        "product_name": product["name"],
+        "weight": product["weight"],
+        "unit_price": product["unit_price"],
+        "normal_price_eur": lidl_money(box["value"]) if box else "",
+        "normal_old_eur": lidl_money(box["old"]) if box else "",
+        "normal_discount_pct": box["discount"] if box and box["discount"] is not None else "",
+        "normal_per": box["per"] if box else "",
+        "normal_weight_box": box["weight_box"] if box else "",
+        "normal_colour": box["colour"] if box else "",
+        "lidl_plus_price_eur": lidl_money(app_box["value"]) if app_box else "",
+        "lidl_plus_old_eur": lidl_money(app_box["old"]) if app_box else "",
+        "lidl_plus_discount_pct": app_box["discount"] if app_box and app_box["discount"] is not None else "",
+        "weight_box_size": product.get("weight_box_size", ""),
+        "labels": ", ".join(product["labels"]),
+        "valid_from": start.isoformat() if start else "",
+        "valid_to": end.isoformat() if end else "",
+        "description": product["description"],
+        "structure_notes": "; ".join(product["extra_notes"]),
+        "price_candidates": product["price_candidates"],
+    }
+
+
+def lidl():
+    """Lidl: text pieces + coloured bands -> data/offers/lidl/offers.csv + page_summary.csv"""
+    input_folder = "data/text/lidl"
+    output_folder = "data/offers/lidl"
+    os.makedirs(output_folder, exist_ok=True)
+
+    # 1. read every page (made by ocr.py): every piece of text WITH its look (size, bold, COLOUR), and the coloured bands
+    widths = {}
+    with open(input_folder + "/pages.csv", encoding="utf-8-sig") as file:
+        for row in csv.DictReader(file):
+            widths[int(row["page"])] = float(row["width"])
+    pages = []
+    page_number = 1
+    while os.path.exists(input_folder + "/page_" + str(page_number) + ".csv"):
+        pieces = []
+        with open(input_folder + "/page_" + str(page_number) + ".csv", encoding="utf-8-sig") as file:
+            for row in csv.DictReader(file):
+                for key in ["left", "top", "right", "bottom", "size"]:
+                    row[key] = float(row[key])
+                row["bold"] = (int(row["flags"]) & 16) != 0 or any(word in row["font"] for word in LIDL_BOLD_WORDS)
+                row["horizontal"] = row["horizontal"] == "yes"            # "no" = turned text like "kg-Preis"
+                row["colour"] = lidl_colour_name(row["color"])
+                row["word"] = lidl_clean(row["text"]).replace("\xad", "").strip()
+                row["used"] = False
+                pieces.append(row)
+        bands = []
+        with open(input_folder + "/bands_" + str(page_number) + ".csv", encoding="utf-8-sig") as file:
+            for row in csv.DictReader(file):
+                bands.append({"left": float(row["left"]), "top": float(row["top"]),
+                              "right": float(row["right"]), "bottom": float(row["bottom"])})
+        pages.append({"number": page_number, "pieces": pieces, "bands": bands, "width": widths.get(page_number, 600.0)})
+        page_number = page_number + 1
+
+    # 2. MEASURE the description size D: the most common size of "Je ..." and "1 kg = ..." lines
+    measured = []
+    for page in pages:
+        for line in lidl_make_lines(page["pieces"]):
+            if re.match(r"Je \S", line["text"]) or re.search(LIDL_UNIT_PRICE, line["text"]):
+                measured.append(round(line["main"]["size"], 1))
+    if not measured:
+        raise Exception("no 'Je ...' or '1 kg = ...' lines found - does this Lidl flyer have real text?")
+    D = max(set(measured), key=measured.count)    # D = the description size; everything else is compared with it
+    PRICE_MIN = 1.8 * D                           # the big euros of a price are at least this size
+    COLOUR_PRICE_MIN = 1.3 * D                    # a YELLOW/RED price may be smaller (colour rule ON)
+
+    # 2b. CHECK the price colours: every big number shaped like a price ("1.99", "1.") is counted once per spot
+    #     (a price printed twice - colour + outline - counts once). Most spots yellow/red -> the colour rule is ON.
+    spots_total, spots_coloured = 0, 0
+    for page in pages:
+        spots = []
+        for p in page["pieces"]:
+            if not p["horizontal"] or p["size"] < PRICE_MIN:
+                continue
+            if not (re.fullmatch(LIDL_WHOLE_PRICE, p["word"]) or re.fullmatch(LIDL_PREFIX + r"\d{1,3}\." + LIDL_STAR, p["word"])):
+                continue
+            coloured = p["colour"] in LIDL_PRICE_COLOURS
+            same = None
+            for spot in spots:
+                if abs(spot["left"] - p["left"]) < p["size"] * 0.3 and abs(spot["top"] - p["top"]) < p["size"] * 0.3:
+                    same = spot
+                    break
+            if same is None:
+                spots.append({"left": p["left"], "top": p["top"], "coloured": coloured})
+            elif coloured:
+                same["coloured"] = True
+        spots_total = spots_total + len(spots)
+        spots_coloured = spots_coloured + sum(1 for spot in spots if spot["coloured"])
+    colour_rule = spots_total >= 10 and spots_coloured >= 0.6 * spots_total
+
+    # 3. the week and year from the footer "HHZ – 47/2026 – DE" / "AUSGABE 47/2026"
+    editions = []
+    for page in pages:
+        for line in lidl_make_lines(page["pieces"]):
+            for week_text, year_text in re.findall(r"\b(\d{1,2})/(20\d\d)\b", line["text"]):
+                if 1 <= int(week_text) <= 53:
+                    editions.append((int(year_text), int(week_text)))
+    if editions:
+        year, week_number = max(set(editions), key=editions.count)
+    else:                                                  # no footer: the week the pipeline works on
+        found = re.search(r"(\d{4})-W(\d\d)", storage.current_week())
+        year, week_number = int(found.group(1)), int(found.group(2))
+    week = str(year) + "-W" + str(week_number).zfill(2)
+    monday = datetime.date.fromisocalendar(year, week_number, 1)
+
+    page_entries = []          # (page, product or None, price box, Lidl Plus box, banners) -> the rows, after step 11
+    all_banners = []
+    page_summary = []
+    bold_fonts = []
+    price_colours = {}
+    spare_total = 0
+    pages_without_prices = []
+
+    for page in pages:
+        try:                   # if one page causes an error, note it and go on with the next page
+            pieces = page["pieces"]
+            page_lines = lidl_make_lines(pieces)
+
+            # 4. date banners: BIG text "Ab Mo. 16.11. bis Sa. 21.11." / "Ab Do. 19.11." (small date text inside a
+            #    description is NOT a banner). The coloured band behind the banner shows the column the dates belong to.
+            banners = []
+            for line in page_lines:
+                if line["main"]["size"] < 1.4 * D:
+                    continue
+                match = re.search(r"\bAb " + LIDL_WEEKDAY + r" ?(\d{1,2})\.(\d{1,2})\.(?: ?bis " + LIDL_WEEKDAY
+                                  + r" ?(\d{1,2})\.(\d{1,2})\.)?", line["text"])
+                if match is None:
+                    continue
+                start = lidl_to_date(int(match.group(1)), int(match.group(2)), year, monday)
+                end = lidl_to_date(int(match.group(3)), int(match.group(4)), year, monday) if match.group(3) else None
+                if start is None:
+                    continue
+                x, y = (line["left"] + line["right"]) / 2, (line["top"] + line["bottom"]) / 2
+                band = None
+                for b in page["bands"]:
+                    if b["left"] <= x <= b["right"] and b["top"] <= y <= b["bottom"] and b["right"] - b["left"] >= line["right"] - line["left"]:
+                        if band is None or (b["right"] - b["left"]) * (b["bottom"] - b["top"]) < (band["right"] - band["left"]) * (band["bottom"] - band["top"]):
+                            band = b                               # the smallest band around the banner text
+                if band is not None:
+                    left, right = band["left"], band["right"]
+                else:
+                    left, right = line["left"] - page["width"] / 6, line["right"] + page["width"] / 6
+                banners.append({"start": start, "end": end, "left": left, "right": right, "bottom": line["bottom"]})
+                all_banners.append((start, end))
+                for p in line["pieces"]:
+                    p["used"] = True                               # a banner is not product text
+
+            # 5. prices. colour rule ON : 1st pass = YELLOW/RED prices (at least COLOUR_PRICE_MIN) -> the real prices
+            #                              2nd pass = BIG prices in another colour (at least PRICE_MIN) -> "spare" prices,
+            #                                         used only under "Mit Lidl Plus" or when a product finds no other price
+            #            colour rule OFF: BIG prices (at least PRICE_MIN), any colour
+            prices = []
+            spare_prices = []
+            for first_pass in [True, False]:
+                if not first_pass and not colour_rule:
+                    break
+                for p in pieces:
+                    if p["used"] or not p["horizontal"]:
+                        continue
+                    if first_pass and colour_rule:
+                        if p["colour"] not in LIDL_PRICE_COLOURS or p["size"] < COLOUR_PRICE_MIN:
+                            continue
+                    elif p["size"] < PRICE_MIN:
+                        continue
+                    found = lidl_read_price(p, pieces, colour_rule)
+                    if found is None:
+                        continue
+                    value, right, cents_piece = found
+                    p["used"] = True
+                    if cents_piece is not None:
+                        cents_piece["used"] = True
+                    duplicate = any(abs(q["left"] - p["left"]) < p["size"] * 0.3 and abs(q["top"] - p["top"]) < p["size"] * 0.3
+                                    for q in prices + spare_prices)
+                    if duplicate:
+                        continue                                   # the same price printed twice (outline + colour)
+                    new_price = {"value": value, "app": False, "left": p["left"], "top": p["top"], "right": right,
+                                 "bottom": p["bottom"], "old": None, "discount": None, "per": "",
+                                 "weight_box": "", "owner": None, "colour": p["colour"]}
+                    if first_pass:
+                        prices.append(new_price)
+                        price_colours[p["colour"]] = price_colours.get(p["colour"], 0) + 1
+                    else:
+                        spare_prices.append(new_price)
+                        spare_total = spare_total + 1
+
+            # 6. Lidl Plus: the price right UNDER the text "Mit Lidl Plus" is the Lidl Plus price (any colour)
+            for line in page_lines:
+                if "Mit Lidl Plus" not in line["text"]:
+                    continue
+                best = None
+                for price in prices + spare_prices:
+                    below = -D <= price["top"] - line["bottom"] <= 10 * D
+                    near = price["left"] < line["right"] + 3 * D and price["right"] > line["left"] - 3 * D
+                    if below and near and (best is None or price["top"] < best["top"]):
+                        best = price
+                if best is not None:
+                    best["app"] = True
+                    if not any(price is best for price in prices):     # a spare price (e.g. dark blue) -> a real price now
+                        spare_prices = [price for price in spare_prices if price is not best]
+                        prices.append(best)
+                for p in line["pieces"]:
+                    p["used"] = True
+
+            # 7. small things: "-33%", old price "2.99" / "UVP 47.99", "kg-Preis", the weight box "1,5 kg", labels
+            rest = [p for p in pieces if not p["used"] and not re.fullmatch(LIDL_FOOTNOTE, p["word"])]
+            label_lines = []
+            for line in lidl_make_lines(rest):
+                text = line["text"].rstrip("\xad")
+                if any(text.startswith(label) for label in LIDL_LABELS):
+                    label_lines.append(line)                       # labels go to the nearest PRODUCT (after step 9)
+                    continue
+                kind, discount, old, per, weight_box = None, None, None, "", ""
+                rest_text = text
+                found = re.search(r"[-–]\s?(\d{1,2})\s?%", rest_text)
+                if found:
+                    discount = int(found.group(1))
+                    rest_text = rest_text.replace(found.group(), " ")
+                found = re.search(r"(?:UVP\s?)?(\d{1,4}\.\d\d)", rest_text)
+                if found and line["main"]["size"] < PRICE_MIN and not (discount is None and lidl_continues_above(line, page_lines, D)):
+                    old = float(found.group(1))
+                    rest_text = rest_text.replace(found.group(), " ")
+                if rest_text.strip() in ["", "UVP"] and (discount is not None or old is not None):
+                    kind = "price info"                            # the line holds ONLY a discount and/or an old price
+                elif text in LIDL_PER_LABELS:
+                    kind, per = "per", LIDL_PER_LABELS[text]
+                elif re.fullmatch(LIDL_SIZE, text) and line["main"]["bold"]:
+                    kind, weight_box = "weight box", text          # "1,5 kg" in the box over the price
+                if kind is None:
+                    continue
+                nearest = None
+                for price in prices:
+                    if nearest is None or lidl_gap(line, price) < lidl_gap(line, nearest):
+                        nearest = price
+                if nearest is None or lidl_gap(line, nearest) > 8 * D:
+                    continue
+                for p in line["pieces"]:
+                    p["used"] = True
+                if discount is not None and nearest["discount"] is None:
+                    nearest["discount"] = discount
+                if old is not None and nearest["old"] is None:
+                    nearest["old"] = old
+                if per:
+                    nearest["per"] = per
+                if weight_box:
+                    nearest["weight_box"] = weight_box
+            for line in label_lines:
+                for p in line["pieces"]:
+                    p["used"] = True
+
+            # 8. lines that are left -> name lines (bold) and description lines (not bold)
+            product_lines = lidl_make_lines([p for p in pieces if not p["used"] and p["horizontal"]
+                                             and not re.fullmatch(LIDL_FOOTNOTE, p["word"])])
+            for line in product_lines:
+                main = line["main"]
+                letters = sum(ch.isalpha() for ch in line["text"])
+                line["letters"] = letters
+                if re.match(r"Je \S", line["text"]) or re.search(LIDL_UNIT_PRICE, line["text"]) or re.search(LIDL_KG_PRICE, line["text"]):
+                    line["kind"] = "description"                   # weight and unit price lines are always description
+                elif main["bold"] and 0.9 * D <= main["size"] <= 2.6 * D and letters >= 1:
+                    line["kind"] = "name"
+                elif not main["bold"] and 0.75 * D <= main["size"] <= 1.4 * D:
+                    line["kind"] = "description"
+                else:
+                    line["kind"] = "other"
+            product_lines.sort(key=lambda line: (line["top"], line["left"]))
+
+            # 9. products: a product STARTS at a name line and takes the lines directly below it (same left edge)
+            products = []
+            for start_line in product_lines:
+                if start_line["kind"] != "name" or start_line["used"] or start_line["letters"] < 2:
+                    continue
+                group = [start_line]
+                start_line["used"] = True
+                last = start_line
+                while True:
+                    next_line = None
+                    for line in product_lines:
+                        if line["used"] or line["kind"] == "other":
+                            continue
+                        if start_line["left"] - 0.5 * D <= line["left"] <= start_line["left"] + 1.5 * D \
+                                and -0.4 * D <= line["top"] - last["bottom"] <= 0.9 * D:
+                            next_line = line
+                            break
+                    if next_line is None:
+                        break
+                    if next_line["kind"] == "name" and any(line["kind"] == "description" for line in group):
+                        break                                      # a new name after the description = the NEXT product
+                    next_line["used"] = True
+                    group.append(next_line)
+                    last = next_line
+                names = [line["text"] for line in group if line["kind"] == "name"]
+                descriptions = [line["text"] for line in group if line["kind"] == "description"]
+                if not descriptions:
+                    continue                                       # a name without description = a headline, not a product
+                name = lidl_join_lines(names)
+                if name.endswith(("!", "?")):
+                    continue                                       # "Entdecke weitere ... auf lidl-fotos.de!" = a headline
+                if group[0]["main"]["font"] not in bold_fonts:
+                    bold_fonts.append(group[0]["main"]["font"])
+
+                # brand = the CAPITAL words at the start of the name ("CHEF SELECT Kartoffelgratin ...")
+                words = name.split()
+                brand_words = []
+                for word in words:
+                    letters_only = re.sub(r"[^A-Za-zÄÖÜäöüß]", "", word)
+                    if len(letters_only) >= 2 and letters_only.isupper() and letters_only not in LIDL_NOT_BRANDS:
+                        brand_words.append(word)
+                    else:
+                        break
+                if brand_words and len(brand_words) < len(words):
+                    brand = " ".join(brand_words)
+                    name = " ".join(words[len(brand_words):])
+                else:
+                    brand = ""
+
+                description = lidl_join_lines(descriptions)
+                products.append({"name": name, "brand": brand, "description": description,
+                                 "weight": lidl_weight_text(description), "labels": [], "extra_notes": [],
+                                 "left": min(l["left"] for l in group), "right": max(l["right"] for l in group),
+                                 "top": min(l["top"] for l in group), "bottom": max(l["bottom"] for l in group),
+                                 "price": None, "app_price": None, "price_candidates": "", "weight_box_size": ""})
+
+            # 9b. a small "product" without "Je", weight or unit price directly UNDER a real product is part of it
+            #     ("Standardgröße ca. 135 x 200 cm" under the bed linen - it must not take the bed linen's price)
+            products.sort(key=lambda product: product["top"])
+            kept = []
+            for product in products:
+                parent = None
+                if not re.search(r"\bJe\s*[A-ZÄÖÜ0-9]", product["description"]) and product["weight"] == "" \
+                        and not re.search(LIDL_UNIT_PRICE, product["description"]):
+                    for other in kept:
+                        if abs(other["left"] - product["left"]) <= 1.5 * D and -0.5 * D <= product["top"] - other["bottom"] <= 3 * D:
+                            parent = other
+                if parent is None:
+                    kept.append(product)
+                else:
+                    parent["description"] = lidl_join_lines([parent["description"], product["brand"], product["name"], product["description"]])
+                    parent["bottom"] = max(parent["bottom"], product["bottom"])
+                    parent["right"] = max(parent["right"], product["right"])
+            products = kept
+            for product in products:                               # sizes and unit prices from the (maybe longer) description
+                product["sizes"] = lidl_all_sizes(product["description"])
+                product["unit_prices"] = lidl_unit_prices_of(product["description"])
+                product["unit_price"] = " ".join([m.group() for m in re.finditer(LIDL_UNIT_PRICE, product["description"])]
+                                                 + [m.group() for m in re.finditer(LIDL_KG_PRICE, product["description"])])
+
+            # labels ("Aktion", "Nur online", ...) go to the nearest product
+            for line in label_lines:
+                nearest = None
+                for product in products:
+                    if nearest is None or lidl_gap(line, product) < lidl_gap(line, nearest):
+                        nearest = product
+                if nearest is not None and lidl_gap(line, nearest) <= 12 * D and line["text"].rstrip("\xad") not in nearest["labels"]:
+                    nearest["labels"].append(line["text"].rstrip("\xad"))
+
+            # 10a. pair products and prices. Each price is used once; a product gets one normal and one Lidl Plus price.
+            #      - the price FITS the printed unit price -> first (also a Lidl Plus price: Lidl often prints its unit price)
+            #      - by position: near the bottom-right corner of the text; price bottom = last text line bottom (bonus);
+            #        a price on the LEFT is possible (fruit tiles), but ranked lower; a BIG price may stand further away
+            #      - a normal price that does NOT fit a printed unit price -> last choice
+            pairs = []
+            for i in range(len(products)):
+                product = products[i]
+                for j in range(len(prices)):
+                    price = prices[j]
+                    box_x, box_y = (price["left"] + price["right"]) / 2, (price["top"] + price["bottom"]) / 2
+                    distance = ((box_x - product["right"]) ** 2 + (box_y - product["bottom"]) ** 2) ** 0.5
+                    if distance > max(45 * D, 8 * (price["bottom"] - price["top"])):
+                        continue                                   # far away
+                    cost = distance
+                    if box_x < product["left"]:
+                        cost = cost + 15 * D                       # on the left side: possible, but less likely
+                    if abs(price["bottom"] - product["bottom"]) <= 1.5 * D:
+                        cost = cost - 10 * D                       # the price stands on the same line as the last text line
+                    if product["unit_prices"]:
+                        if lidl_fits(price["value"], product["sizes"], product["unit_prices"]):
+                            cost = cost - 100000                   # confirmed by the unit price
+                        elif not price["app"]:
+                            cost = cost + 100000                   # a unit price is printed, but it does not fit
+                    pairs.append((cost, i, j))
+            pairs.sort()
+            for cost, i, j in pairs:
+                product, price = products[i], prices[j]
+                if price["owner"] is not None:
+                    continue
+                slot = "app_price" if price["app"] else "price"
+                if product[slot] is None:
+                    product[slot] = price
+                    price["owner"] = i
+
+            # 10b. 2nd round: a product still WITHOUT a price takes a price NOBODY took on this page, also far away
+            #      (online pages print the price far on the right, in the same row as the text).
+            #      A price in the same ROW comes first, then other leftover prices up to 80 D away. Nearest first.
+            #      If the product has a unit price, the price must fit it.
+            second = []
+            for i, product in enumerate(products):
+                if product["price"] is not None or product["app_price"] is not None:
+                    continue
+                for j, price in enumerate(prices):
+                    if price["owner"] is not None:
+                        continue
+                    if product["unit_prices"] and not lidl_fits(price["value"], product["sizes"], product["unit_prices"]):
+                        continue
+                    box_x, box_y = (price["left"] + price["right"]) / 2, (price["top"] + price["bottom"]) / 2
+                    distance = ((box_x - product["right"]) ** 2 + (box_y - product["bottom"]) ** 2) ** 0.5
+                    same_row = price["bottom"] >= product["top"] - 6 * D and price["top"] <= product["bottom"] + 6 * D
+                    if same_row:
+                        second.append((distance, i, j))
+                    elif distance <= 80 * D:
+                        second.append((distance + 100 * D, i, j))
+            second.sort()
+            for cost, i, j in second:
+                product, price = products[i], prices[j]
+                if price["owner"] is not None or product["price"] is not None or product["app_price"] is not None:
+                    continue
+                product["app_price" if price["app"] else "price"] = price
+                price["owner"] = i
+                product["extra_notes"].append("price far from the text (2nd round)")
+
+            # 10c. still no price: a big SPARE price that is not yellow/red (e.g. dark blue) close to the product
+            third = []
+            for i, product in enumerate(products):
+                if product["price"] is not None or product["app_price"] is not None:
+                    continue
+                for j, price in enumerate(spare_prices):
+                    if price["owner"] is not None:
+                        continue
+                    if product["unit_prices"] and not lidl_fits(price["value"], product["sizes"], product["unit_prices"]):
+                        continue
+                    box_x, box_y = (price["left"] + price["right"]) / 2, (price["top"] + price["bottom"]) / 2
+                    distance = ((box_x - product["right"]) ** 2 + (box_y - product["bottom"]) ** 2) ** 0.5
+                    if distance <= max(45 * D, 8 * (price["bottom"] - price["top"])):
+                        third.append((distance, i, j))
+            third.sort()
+            for cost, i, j in third:
+                product, price = products[i], spare_prices[j]
+                if price["owner"] is not None or product["price"] is not None or product["app_price"] is not None:
+                    continue
+                product["price"] = price
+                price["owner"] = i
+                prices.append(price)
+                product["extra_notes"].append("the price is not yellow/red (" + price["colour"] + ")")
+
+            # 10d. a Lidl Plus price but no normal price: the normal price stands right ABOVE the "Mit Lidl Plus" price
+            for i, product in enumerate(products):
+                app_box = product["app_price"]
+                if app_box is None or product["price"] is not None:
+                    continue
+                for price in prices:
+                    if price["owner"] is None and not price["app"] and price["bottom"] <= app_box["top"] + D \
+                            and app_box["top"] - price["bottom"] <= 12 * D \
+                            and price["left"] < app_box["right"] + 3 * D and price["right"] > app_box["left"] - 5 * D:
+                        product["price"] = price
+                        price["owner"] = i
+                        break
+
+            # 10e. a Lidl Plus price is always LOWER than the normal price - a higher one came from a neighbour: remove it
+            for product in products:
+                if product["price"] is not None and product["app_price"] is not None \
+                        and product["app_price"]["value"] >= product["price"]["value"]:
+                    product["app_price"]["owner"] = None
+                    product["app_price"] = None
+                    product["extra_notes"].append("a Lidl Plus price higher than the normal price was removed")
+
+            # no "Je ..." weight: take the weight box over the price ("1,5 kg") or "kg-Preis" (= 1 kg)
+            for product in products:
+                box = product["price"] or product["app_price"]
+                if box is not None and box["weight_box"]:
+                    product["sizes"] = product["sizes"] + lidl_sizes_of(box["weight_box"])
+                    product["weight_box_size"] = box["weight_box"]
+                    if product["weight"] == "":
+                        product["weight"] = box["weight_box"]
+                if product["weight"] == "" and box is not None and box["per"]:
+                    product["weight"] = box["per"]
+                # no price at all: write down what is near the product (to find out WHY - send this column to Claude)
+                if box is None:
+                    near = ["page " + str(page["number"]) + ": " + str(len(prices)) + " prices read for "
+                            + str(len(products)) + " products"]
+                    for p in pieces:
+                        if not p["used"] and p["size"] >= 1.2 * D and re.search(r"\d", p["word"]) and lidl_gap(p, product) <= 40 * D:
+                            near.append("'" + p["word"] + "' size " + str(round(p["size"], 1)) + " " + p["colour"])
+                    for price in prices:
+                        if price["owner"] is not None and lidl_gap(price, product) <= 40 * D:
+                            near.append(f"{price['value']:.2f} taken by {products[price['owner']]['name'][:30]}")
+                    for price in spare_prices:
+                        if price["owner"] is None and lidl_gap(price, product) <= 40 * D:
+                            near.append(f"{price['value']:.2f} in {price['colour']} not taken")
+                    product["price_candidates"] = "; ".join(near[:12])
+                    if len(prices) == 0 and page["number"] not in pages_without_prices:
+                        pages_without_prices.append(page["number"])
+
+            # 10f. the rows of this page: every product, + every normal price box that no product took
+            #      (verify.py may give such a price to a product whose unit price says it must be that price)
+            for product in products:
+                page_entries.append((page["number"], product, product["price"], product["app_price"], banners))
+            unpaired = []
+            for price in prices:
+                if price["owner"] is None:
+                    unpaired.append(lidl_money(price["value"]))
+                    if not price["app"]:
+                        page_entries.append((page["number"], None, price, None, banners))
+            page_summary.append({
+                "page": page["number"],
+                "products": len(products),
+                "prices": len(prices),
+                "products_without_price": sum(1 for p in products if p["price"] is None and p["app_price"] is None),
+                "unpaired_prices": " ".join(unpaired),
+                "error": "",
+            })
+            print("Page", page["number"], "-", len(products), "products,", len(prices), "prices")
+
+        except Exception as error:
+            page_summary.append({"page": page["number"], "products": 0, "prices": 0, "products_without_price": 0,
+                                 "unpaired_prices": "", "error": str(error)})
+            print("ERROR on page", page["number"], "->", error)
+
+    # 11. dates: the main dates = the "bis" banner printed most often; without banners: Monday - Saturday of the week.
+    #     Every product gets the nearest date banner ABOVE it in its column.
+    with_end = [pair for pair in all_banners if pair[1] is not None]
+    if with_end:
+        main_dates = max(set(with_end), key=with_end.count)
+    else:
+        main_dates = (monday, monday + datetime.timedelta(days=5))
+    all_offers = []
+    for page_number, product, box, app_box, banners in page_entries:
+        start, end = lidl_dates_for(product if product is not None else box, banners, main_dates)
+        all_offers.append(lidl_row(week, page_number, product, box, app_box, start, end))
+
+    # 12. save all offers in one file + the page summary (used by evaluate.py)
+    if not any(offer["product_name"] for offer in all_offers):
+        raise Exception("no Lidl products found on any page - did Lidl change the flyer design?")
+    with open(output_folder + "/offers.csv", "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=all_offers[0].keys())
+        writer.writeheader()
+        writer.writerows(all_offers)
+    with open(output_folder + "/page_summary.csv", "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=page_summary[0].keys())
+        writer.writeheader()
+        writer.writerows(page_summary)
+    products_found = sum(1 for offer in all_offers if offer["product_name"])
+    print("Week:", week, "| main dates:", main_dates[0], "-", main_dates[1])
+    print("Measured description size:", D, "| price at least:", round(PRICE_MIN, 1), "| name fonts seen:", bold_fonts[:5])
+    print("Price colour check:", spots_coloured, "of", spots_total, "big price numbers are yellow/red -> colour rule",
+          "ON (yellow/red prices from size " + str(round(COLOUR_PRICE_MIN, 1)) + ")" if colour_rule else "OFF (size rule only)")
+    print("Prices read:", sum(price_colours.values()), "| by colour:", price_colours, "| spare (other colour):", spare_total)
+    if pages_without_prices:
+        print("Pages with products but NO price as text:", pages_without_prices, "(the prices there are probably pictures)")
+    print("Done!", products_found, "Lidl products (+", len(all_offers) - products_found, "prices without a product) saved in",
+          output_folder + "/offers.csv")
+
+
+# =====================================================================================================
 # RUN every store of config/settings.yaml with its own function (kaufland() and netto() above)
 # (only when started as a program - python pipeline/structure.py - not when the tests read this file)
 # =====================================================================================================
 if __name__ == "__main__":
-    STORE_PARTS = {"kaufland": kaufland, "netto": netto}
+    STORE_PARTS = {"kaufland": kaufland, "netto": netto, "lidl": lidl}
     for store in storage.stores():
         if store not in STORE_PARTS:
             print("\n" + store + ": structure.py has no function for this store yet - skipped")

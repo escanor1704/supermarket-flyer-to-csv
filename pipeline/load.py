@@ -1,28 +1,26 @@
-# Stage 7: add this week's offers of every store to the final files  -  version 3: one file per week
-#   data/output/offers_2026-W46.csv           -> the SIMPLE final file of ONE week (10 columns), all stores together
-#   data/output/offers_2026-W47.csv              (column "store" says kaufland / netto). Older weeks are never touched.
-#   data/output/offers_detailed_<store>.csv   -> more columns, one file per store (for checking and later steps)
-# kaufland() and netto() each turn ONE of their verified rows into a row of the final file, with their own
-# weight rule (both write the weight in the same style: '500 g', '0.75 l', '24 x 0.33 l', 'Stück').
-# Only the OFFER price goes into these files. The old (crossed-out) price and the XTRA price are often
-# missing on the flyer, so they would make empty columns. They are still used inside the checks.
-# No cell is ever empty: missing values get a default ("no", "0", "none" or "UNKNOWN").
+# load.py (stage 7 of 8) - adds this week's good offers to the weekly file
+#
+# How it works:
+#   Every store turns its good offers into the same 10 columns, and all stores go into one file per week:
+#   data/output/offers_2026-W47.csv. If a store runs again for that week, its old rows are replaced (nothing
+#   is doubled) and the other stores stay. Only the offer price is saved. No cell is ever empty ("no" / "UNKNOWN").
+#
+# Tried and tuned:
+#   - every store wrote the weight differently ("0,75 Liter", "200-g-Packg.", "2x100 g") -> one style: 0.75 l, 200 g, 2 x 100 g
+#   - the 10th column was only for Kaufland (kaufland_card_xtra) -> app_or_card_price: Kaufland Card, Netto app, Lidl Plus
+#   - one big file with all weeks, plus a detailed file -> one simple file per week
 
 import os
 import csv
 import re
-import shutil
 import storage
 
-OLD_ALL_WEEKS_FILE = "data/output/offers.csv"          # the old final file (all weeks in one file, before version 3)
-
 # =====================================================================================================
-# THE FINAL FILE - the same for every store
+# THE WEEKLY FILE - the same for every store
 # =====================================================================================================
 SIMPLE_COLUMNS = ["week", "store", "offer_start_date", "offer_end_date", "brand",
                   "product_name", "product_weight", "price_eur", "offer_applied", "app_or_card_price"]
-RENAMED = {"kaufland_card_xtra": "app_or_card_price"}     # old column name -> new name (old files are renamed, not thrown away)
-NOT_IN_DATA_FILES = ["regular_price_eur", "xtra_price_eur", "xtra"]     # often empty -> left out of both files
+DEFAULTS = {"offer_applied": "no", "app_or_card_price": "no"}    # an empty yes/no cell -> "no", anything else -> "UNKNOWN"
 
 
 def price_text(value):
@@ -30,32 +28,6 @@ def price_text(value):
     if value == "":
         return ""
     return f"{float(value):.2f}"
-
-
-# no empty cells in the data files: an empty cell gets a default value
-#   yes/no columns -> "no",  "nothing" numbers -> "0",  no label / no problem -> "none",  everything else -> "UNKNOWN"
-DEFAULTS = {"app_or_card_price": "no", "offer_applied": "no", "discount_pct": "0", "deposit_eur": "0",
-            "label": "none", "labels": "none", "problems": "none", "notes": "none", "verify_note": "none",
-            "multi_buy": "1", "app_discount_pct": "0", "app_multi_buy": "1", "app_labels": "none"}
-
-
-def fill_empty(row, columns):
-    """put a default value into every empty cell of this row"""
-    for column in columns:
-        if str(row.get(column, "") or "").strip() == "":
-            row[column] = DEFAULTS.get(column, "UNKNOWN")
-
-
-def is_date(text):
-    """True for '2026-11-14' (False for '' or 'UNKNOWN')"""
-    return re.fullmatch(r"\d{4}-\d\d-\d\d", text or "") is not None
-
-
-def start_and_end(row):
-    """the offer dates of a row (the simple file says offer_start_date, the detailed file valid_from)"""
-    start = row.get("offer_start_date") or row.get("valid_from") or ""
-    end = row.get("offer_end_date") or row.get("valid_to") or ""
-    return start, end
 
 
 def read_rows(file_name):
@@ -66,52 +38,25 @@ def read_rows(file_name):
         return list(csv.DictReader(file))
 
 
-def save_with_replace(final_file, rows, columns):
-    """Add rows to a final file. Old rows of the SAME FLYER are replaced, so a rerun never doubles.
-    Same flyer = same week + store, OR same store + same last offer day (also catches a flyer saved under a wrong week).
-    (In a weekly file this means: the store's rows of that week are replaced, the other store's rows are kept.)
-    Old rows with broken dates (start after end, e.g. 2026-12-19 -> 2026-11-14) are removed.
-    An old column name (kaufland_card_xtra) is renamed. If the file has other columns (older code), it is put aside."""
-    new_keys = []              # (week, store) of the new flyers
-    new_ends = []              # (store, last offer day) of the new flyers
+def save_week(week_file, rows):
+    """add the new rows of one week to its file: data/output/offers_2026-W47.csv
+    The stores in the new rows lose their old rows in that file (so a rerun never doubles), the other stores stay.
+    No cell is ever empty: an empty yes/no cell -> "no", anything else -> "UNKNOWN"."""
+    new_stores = []
     for row in rows:
-        if (row["week"], row["store"]) not in new_keys:
-            new_keys.append((row["week"], row["store"]))
-        start, end = start_and_end(row)
-        if is_date(end) and (row["store"], end) not in new_ends:
-            new_ends.append((row["store"], end))
-    old_rows_kept = []
-    replaced = 0
-    if os.path.exists(final_file):
-        with open(final_file, encoding="utf-8-sig") as file:
-            old_columns = csv.DictReader(file).fieldnames or []
-        old_columns = [RENAMED.get(column, column) for column in old_columns]       # 'kaufland_card_xtra' -> 'app_or_card_price'
-        if old_columns != columns:
-            old_version = final_file.replace(".csv", "_old_version.csv")
-            os.replace(final_file, old_version)                                    # put the old file aside
-            print("Note:", final_file, "had other columns (older code) -> moved to", old_version, "- starting a new file")
-    if os.path.exists(final_file):
-        shutil.copy(final_file, final_file.replace(".csv", "_backup.csv"))     # safety copy
-        with open(final_file, encoding="utf-8-sig") as file:
-            for row in csv.DictReader(file):
-                for old_name, new_name in RENAMED.items():
-                    if old_name in row:
-                        row[new_name] = row.pop(old_name)
-                start, end = start_and_end(row)
-                same_flyer = (row.get("week"), row.get("store")) in new_keys or (row.get("store"), end) in new_ends
-                broken_dates = is_date(start) and is_date(end) and start > end
-                if same_flyer or broken_dates:
-                    replaced = replaced + 1          # replaced by the new rows (or removed: broken dates)
-                else:
-                    old_rows_kept.append(row)        # another flyer (another week or store) -> keep it
-    all_rows = old_rows_kept + rows
+        if row["store"] not in new_stores:
+            new_stores.append(row["store"])
+    old_rows = [row for row in read_rows(week_file) if row["store"] not in new_stores]
+    all_rows = old_rows + rows
     for row in all_rows:
-        fill_empty(row, columns)
-    with open(final_file, "w", newline="", encoding="utf-8-sig") as file:
-        writer = csv.DictWriter(file, fieldnames=columns, extrasaction="ignore", restval="")
+        for column in SIMPLE_COLUMNS:
+            if str(row.get(column, "") or "").strip() == "":
+                row[column] = DEFAULTS.get(column, "UNKNOWN")
+    with open(week_file, "w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=SIMPLE_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(all_rows)
-    return new_keys, len(old_rows_kept), replaced, len(all_rows)
+    return len(old_rows), len(all_rows)
 
 
 # =====================================================================================================
@@ -186,22 +131,20 @@ def kaufland(r):
     else:
         offer_applied = "no"
     if r.get("xtra", "") == "yes":
-        r["app_or_card_price"] = "yes"      # the flyer shows an extra price for Kaufland Card XTRA members
+        app_or_card_price = "yes"           # the flyer shows an extra price for Kaufland Card XTRA members
     else:
-        r["app_or_card_price"] = "no"       # not mentioned -> "no" (never empty)
-    if r["brand"].strip() == "":
-        r["brand"] = "UNKNOWN"              # no brand in capitals on the flyer
+        app_or_card_price = "no"
     return {
         "week": r["week"],
         "store": r["store"],
         "offer_start_date": r["valid_from"],
         "offer_end_date": r["valid_to"],
-        "brand": r["brand"],
+        "brand": r["brand"].strip() or "UNKNOWN",     # no brand in capitals on the flyer -> UNKNOWN
         "product_name": r["product_name"],  # without the brand
         "product_weight": kaufland_weight(r),
         "price_eur": price_text(r["offer_price_eur"]),
         "offer_applied": offer_applied,
-        "app_or_card_price": r["app_or_card_price"],
+        "app_or_card_price": app_or_card_price,
     }
 
 
@@ -254,9 +197,9 @@ def netto(r):
     else:
         offer_applied = "no"
     if r["app_price_eur"]:
-        r["app_or_card_price"] = "yes"      # the flyer shows an extra price with the Netto app
+        app_or_card_price = "yes"           # the flyer shows an extra price with the Netto app
     else:
-        r["app_or_card_price"] = "no"
+        app_or_card_price = "no"
     return {
         "week": r["week"],
         "store": r["store"],
@@ -267,7 +210,67 @@ def netto(r):
         "product_weight": netto_weight(r["weight"]),        # the same style as Kaufland
         "price_eur": price_text(r["offer_price_eur"]),
         "offer_applied": offer_applied,
-        "app_or_card_price": r["app_or_card_price"],
+        "app_or_card_price": app_or_card_price,
+    }
+
+
+# =====================================================================================================
+# LIDL: one verified row -> one row of the final file  (Lidl's own helpers)
+# =====================================================================================================
+LIDL_NUMBER = r"\d+(?:,\d+|\.\d{1,2}(?!\d))?"                  # "100", "1,5", "12.5"  (but not "1.050")
+LIDL_WEIGHT_SIZE = (r"(?:(\d+)\s?x\s?)?(" + LIDL_NUMBER + r"(?:\s?/\s?" + LIDL_NUMBER + r")*)\s?"
+                    r"(kg|g|ml|cl|l|Liter|Stück|St\.|m|Meter|WL|Blatt|Rollen)(?![A-Za-zäöüß])")
+LIDL_UNIT_NAMES = {"Liter": "l", "St.": "Stück", "Meter": "m"}
+
+
+def lidl_number_text(text):
+    """'1,75' -> '1.75' ,  '100' -> '100' ,  '12.5' -> '12.5'"""
+    number = float(text.replace(",", "."))
+    if number == int(number):
+        return str(int(number))
+    return str(round(number, 3))
+
+
+def lidl_weight(text):
+    """Lidl's weight text (written after "Je") -> the size in the style of the final file:
+    '100 g' -> '100 g'     '1,75 l' -> '1.75 l'     '2x100 g' -> '2 x 100 g'     '80/100 g' -> '80/100 g'
+    'ca. 580 g' -> 'ca. 580 g'     'Topf' -> 'Topf'     'Set' -> 'Set'     no size at all -> 'UNKNOWN'"""
+    text = " ".join((text or "").split())
+    if text == "":
+        return "UNKNOWN"
+
+    def one_size(match):
+        count, numbers, unit = match.group(1), match.group(2), match.group(3)
+        size = "/".join(lidl_number_text(number.strip()) for number in numbers.split("/"))
+        size = size + " " + LIDL_UNIT_NAMES.get(unit, unit)
+        if count:
+            size = count + " x " + size
+        return size
+
+    return re.sub(LIDL_WEIGHT_SIZE, one_size, text)
+
+
+def lidl(r):
+    labels = r["labels"].split(", ")
+    if r["old_price_eur"] or r["discount_pct"] or r["lidl_plus_price_eur"] or "Aktion" in labels:
+        offer_applied = "yes"        # old price, -XX%, a Lidl Plus price, or "Aktion"
+    else:
+        offer_applied = "no"
+    if r["lidl_plus_price_eur"]:
+        app_or_card_price = "yes"           # the flyer shows an extra price with Lidl Plus (the Lidl app)
+    else:
+        app_or_card_price = "no"
+    return {
+        "week": r["week"],
+        "store": r["store"],
+        "offer_start_date": r["valid_from"],
+        "offer_end_date": r["valid_to"],
+        "brand": r["brand"] or "UNKNOWN",   # the CAPITAL words at the start of the name ("CHEF SELECT")
+        "product_name": r["product_name"],  # without the brand
+        "product_weight": lidl_weight(r["weight"]),     # the same style as Kaufland and Netto
+        "price_eur": price_text(r["offer_price_eur"]),
+        "offer_applied": offer_applied,
+        "app_or_card_price": app_or_card_price,
     }
 
 
@@ -277,17 +280,10 @@ def netto(r):
 # =====================================================================================================
 if __name__ == "__main__":
     os.makedirs("data/output", exist_ok=True)
-    STORE_PARTS = {"kaufland": kaufland, "netto": netto}
+    STORE_PARTS = {"kaufland": kaufland, "netto": netto, "lidl": lidl}
 
-    # 0. ONE TIME: the old final file (all weeks in one file) is put aside - from now on there is one file per week
-    if os.path.exists(OLD_ALL_WEEKS_FILE):
-        os.makedirs("data/output/old", exist_ok=True)
-        os.replace(OLD_ALL_WEEKS_FILE, "data/output/old/offers_all_weeks.csv")
-        print("Note: the old", OLD_ALL_WEEKS_FILE, "(all weeks in one file) -> data/output/old/offers_all_weeks.csv",
-              "- from now on: one file per week")
-
-    # 1. every store: its good offers -> simple rows, sorted by week
-    rows_of_week = {}            # '2026-W46' -> the simple rows of that week (all stores)
+    # 1. every store: its good offers -> rows of the weekly file, sorted by week
+    rows_of_week = {}            # '2026-W47' -> the new rows of that week (all stores)
     counts = []
     for store in storage.stores():
         verified_file = "data/review/" + store + "/offers_verified.csv"
@@ -295,31 +291,22 @@ if __name__ == "__main__":
         if store not in STORE_PARTS or len(rows) == 0:
             print(store + ": no new offers in this run (" + verified_file + ") - nothing to add")
             continue
-        flyer_week = storage.current_week()          # for rows without a week: the week the pipeline is working on
         for r in rows:
-            simple = STORE_PARTS[store](r)
-            if not re.fullmatch(r"\d{4}-W\d\d", simple["week"]):
-                simple["week"] = flyer_week
-            rows_of_week.setdefault(simple["week"], []).append(simple)
+            row = STORE_PARTS[store](r)
+            if not re.fullmatch(r"\d{4}-W\d\d", row["week"]):
+                row["week"] = storage.current_week()     # a row without a week: the week the pipeline is working on
+            rows_of_week.setdefault(row["week"], []).append(row)
         counts.append(store + ": " + str(len(rows)))
-        # the detailed file of this store (all columns, except the often empty ones)
-        detailed_columns = []
-        for column in rows[0].keys():
-            if column not in NOT_IN_DATA_FILES:
-                detailed_columns.append(column)
-        detailed_columns.append("app_or_card_price")
-        save_with_replace("data/output/offers_detailed_" + store + ".csv", rows, detailed_columns)
 
     if len(rows_of_week) == 0:
         print("No new offers of any store - nothing to add (this week is already done, or no flyer).")
         exit()
 
-    # 2. save: one final file per week. A store's rows of that week are replaced (a rerun never doubles),
-    #    the other store's rows stay. The files of other weeks are not touched.
+    # 2. save: one file per week (the files of other weeks are not touched)
     print("New offers:", " | ".join(counts))
     for week in sorted(rows_of_week):
         week_file = storage.weekly_file(week)
-        keys, kept, replaced, total = save_with_replace(week_file, rows_of_week[week], SIMPLE_COLUMNS)
+        kept, total = save_week(week_file, rows_of_week[week])
         print("Week", week, "->", week_file, "| new rows:", len(rows_of_week[week]), "| rows of other stores kept:", kept,
-              "| old rows replaced:", replaced, "| now", total, "offers")
-    print("Done! One file per week in data/output (all details in data/output/offers_detailed_<store>.csv)")
+              "| now", total, "offers")
+    print("Done! One file per week in data/output")
